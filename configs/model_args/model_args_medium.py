@@ -12,6 +12,9 @@ NOTE: To essentially "turn off" MoE, set num_experts=1.
 
 from dataclasses import dataclass
 
+from configs.training_args import TrainingArgs
+training_args = TrainingArgs()
+
 @dataclass
 class ModelArgs:
     """
@@ -31,11 +34,21 @@ class ModelArgs:
     pad_token_id: int = 0
     eos_token_id: int = 65535
     gradient_checkpointing: bool = True
+    max_batch_size: int = 1024
     num_experts: int = 1
     top_k: int = 2
 
     def __post_init__(self):
         """Post initialization for assertions."""
-        assert self.d_model % self.num_heads == 0
-        assert self.num_heads % self.query_groups == 0
-        assert self.d_ffn == self.d_model * 4
+        if self.d_model % self.num_heads != 0:
+            raise ValueError(f"d_model must be divisble by 0, got {self.d_model} / {self.num_heads} != 0")
+        if self.num_heads % self.query_groups != 0:
+            raise ValueError(f"d_model must be divisble by 0, got {self.num_heads} / {self.query_groups} != 0")
+        if self.d_model * 4 != self.d_ffn:
+            raise ValueError(f"d_model * 4 must be equal to d_ffn, got {self.d_model} * 4 != {self.d_ffn}")
+        if self.max_batch_size < training_args.batch_size:
+            raise ValueError(f"max_batch_size must be >= batch_size, got {training_args.batch_size} < {self.max_batch_size}")
+        if self.num_experts < self.top_k:
+            raise ValueError(f"num_experts must be >= top_k, got {self.top_k} > {self.num_experts}")
+
+

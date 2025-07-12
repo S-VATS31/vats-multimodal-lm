@@ -578,7 +578,7 @@ def train_step(
 
         # Forward pass with AMP
         if scaler is not None:
-            with device_specific_amp(device=device, dtype=dtype):
+            with torch.amp.autocast(device_type=device.type, dtype=dtype):
                 logits, _, aux_loss = model(input_ids, padding_mask=attention_mask, use_cache=False)
                 loss, lm_loss, aux_loss_val = compute_loss(logits, labels, aux_loss, aux_loss_weight=0.01)
                 loss = loss / training_args.grad_accum_steps
@@ -727,7 +727,7 @@ def evaluate_model(
                 labels = batch['labels'].to(device, non_blocking=training_args.pin_memory)
                 attention_mask = batch['attention_mask'].to(device, non_blocking=training_args.pin_memory)
 
-                with device_specific_amp(device=device, dtype=dtype):
+                with torch.amp.autocast(device_type=device.type, dtype=dtype):
                     logits, _, aux_loss = model(input_ids, padding_mask=attention_mask, use_cache=False)
                     loss, lm_loss, aux_loss_val = compute_loss(logits, labels, aux_loss)
 
