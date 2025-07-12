@@ -10,7 +10,6 @@ from configs.model_args.model_args_medium import ModelArgs
 
 # TODO: remove device_specific_amp
 # TODO: remove xla support
-from configs.setup_amp import device_specific_amp
 
 import math
 from typing import Dict, List, Tuple, Optional
@@ -59,7 +58,7 @@ class RoPE(nn.Module):
         Returns:
             torch.Tensor: Tensor with RoPE applied, same shape as input.
         """
-        with device_specific_amp(device=device, dtype=dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
             seq_len = x.size(1)
 
             # Update cache if needed
@@ -182,7 +181,7 @@ class RMSNorm(nn.Module):
         Returns:
             torch.Tensor: Normalized output tensor of same shape.
         """
-        with device_specific_amp(device=device, dtype=dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
             rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
             return self.weight * (x / rms)
 
@@ -394,7 +393,7 @@ class Attention(nn.Module):
             ValueError if `x` does not have 3 shape [B, T, d_model].
             ValueError if `padding_mask` does not have shape [B, T].
         """
-        with device_specific_amp(device=device, dtype=dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
             B, T, D = x.shape
             if x.shape != (B, T, D):
                 raise ValueError(f"Expected x to have shape [B, T, d_model], got {x.shape}")
@@ -581,7 +580,7 @@ class SwiGLUExpert(nn.Module):
         Returns:
             torch.Tensor: Output tensor passed through the expert layer with same shape.
         """
-        with device_specific_amp(device=device, dtype=dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
             return self.dropout(self.weight2(F.silu(self.weight1(x)) * self.weight3(x)))
 
 class TopKRouter(nn.Module):
@@ -622,7 +621,7 @@ class TopKRouter(nn.Module):
                 - Torch.Tensor: Indices of gating scores.
                 - torch.Tensor: Tensor containing auxiliary loss.
         """
-        with device_specific_amp(device=device, dtype=dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
             B, T, d_model = x.shape
 
             # Flatten for efficiency
@@ -829,7 +828,7 @@ class AttentionBlock(nn.Module):
                 - torch.Tensor: Output tensor of shape [B, T, d_model].
                 - Dict[str, torch.Tensor]: Cache dictionary with 'k' and 'v' tensors.
         """
-        with device_specific_amp(device=device, dtype=dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
             attn_out, cache_out = self.attn(
                 self.rms_norm(x),
                 padding_mask=padding_mask,
@@ -890,7 +889,7 @@ class MoEBlock(nn.Module):
                 - Output tensor passed through the MoE Block with the same shape.
                 - Auxiliary loss from the MoE layer.
         """
-        with device_specific_amp(device=device, dtype=dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
             moe_out, aux_loss = self.moe(self.rms_norm(x), padding_mask)
             return x + self.dropout(moe_out), aux_loss
 
@@ -956,7 +955,7 @@ class TransformerBlock(nn.Module):
                 - Cache dictionary with 'k' and 'v' tensors if use_cache is True, else None.
                 - Auxiliary loss from the MoE layer.
         """
-        with device_specific_amp(device=device, dtype=dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
             x, cache_out = self.attn_block(
                 x,
                 padding_mask=padding_mask,
@@ -1117,7 +1116,7 @@ class Transformer(nn.Module):
                 - Optional[List[Dict[str, torch.Tensor]]]: List of cache dictionaries for each layer.
                 - Sum of auxiliary losses from all MoE layers.
         """
-        with device_specific_amp(device=device, dtype=dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
             # Ensure input_ids is a LongTensor (int64)
             if input_ids.dtype != torch.int64:
                 input_ids = input_ids.long()
