@@ -7,6 +7,9 @@ from configs.setup_env import (
     )
 
 from configs.model_args.model_args_medium import ModelArgs
+
+# TODO: remove device_specific_amp
+# TODO: remove xla support
 from configs.setup_amp import device_specific_amp
 
 import math
@@ -108,7 +111,7 @@ class RoPE(nn.Module):
         Returns:
             torch.Tensor: Rotated output tensor with positional awareness.
         """
-        with device_specific_amp(device=device, dtype=dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
             # Split x into even and odd dimensions
             x1 = x[..., ::2]
             x2 = x[..., 1::2]
