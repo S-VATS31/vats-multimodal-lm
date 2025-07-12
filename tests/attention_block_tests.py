@@ -31,7 +31,7 @@ class TestAttentionBlock(unittest.TestCase):
 
     def test_no_dropout(self):
         """Ensure two forward pass tensors are the same with no dropout."""
-        self.attention_block.eval()  # Turn off dropout
+        self.attention_block.eval() # Turn off dropout
         x1, _ = self.attention_block(self.x)
         x2, _ = self.attention_block(self.x)
         self.assertTrue(torch.allclose(x1, x2))

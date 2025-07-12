@@ -19,10 +19,6 @@ from torch.utils.checkpoint import checkpoint
 class RoPE(nn.Module):
     """Rotary positional embeddings (RoPE) to be applied to the query and key vectors.
 
-    Rotary Positional Embedding (RoPE) applies a complex rotation to the query and key
-    vectors using sinusoidal functions. This is done by element-wise mixing of the even
-    and odd dimensions of each vector with precomputed sine and cosine frequencies.
-
     Args:
         head_dim (int): Dimension of each attention head.
         theta (float): Exponential base of the inverse frequency.
@@ -95,10 +91,6 @@ class RoPE(nn.Module):
     ) -> torch.Tensor:
         """Apply the rotation using the RoPE formula.
 
-        This functions applies a rotation to the input via complex multiplication.
-        This allows the direction of the vectors to be shifted while preserving the
-        magnitude of the vectors
-
         Args:
             x (torch.Tensor): Input tensor of shape [batch_size, seq_len, num_heads, head_dim].
             cos_freqs (torch.Tensor): Cosine frequencies of shape [seq_len, head_dim//2].
@@ -152,9 +144,6 @@ class RoPE(nn.Module):
 class RMSNorm(nn.Module):
     """Apply RMSNorm to input tensors to normalize their root mean square norm.
 
-    RMSNorm normalizes the tensor's root mean squared norm instead of the mean and
-    variance unlike LayerNorm. RMSNorm is also a much simpler alternative.
-
     Formula:
         x_normalized = x / RMS
         Where RMS = sqrt(mean(x**2))
@@ -184,10 +173,6 @@ class RMSNorm(nn.Module):
 
 class KVCache:
     """Key-Value cache for efficient autoregressive generation.
-
-    Stores key and value tensors for each transformer layer to avoid recomputation
-    during sequential token generation. The cache supports dynamic updates and retrieval
-    for batched inputs up to a maximum sequence length and batch size.
 
     Args:
         max_batch_size (int): Maximum batch size supported by the cache.
@@ -223,9 +208,6 @@ class KVCache:
 
     def initialize(self, batch_size: int) -> None:
         """Initialize or reset the cache for a given batch size.
-
-        Creates zero-filled key and value tensors for each layer, sized for the
-        specified batch size and maximum sequence length.
 
         Args:
             batch_size (int): Number of sequences to process.
@@ -309,20 +291,13 @@ class KVCache:
         self.current_seq_len += increment
 
     def reset(self) -> None:
-        """Reset the cache to its initial state.
-
-        Clears the cache, current sequence length, and batch size.
-        """
+        """Reset the cache to its initial state."""
         self.cache = None
         self.current_seq_len = None
         self.batch_size = None
 
 class Attention(nn.Module):
     """Apply Grouped Query Attention (GQA) to QKV vectors as well as causal masking.
-
-    Instead of computing attention for all key/value pairs, GQA splits these key/value
-    pairs into query groups. This allows for significantly less computation. This program
-    also implements causal masking to allow for autoregressive generation.
 
     Args:
         d_model (int): Dimensionality of the model's embeddings.
@@ -771,9 +746,6 @@ class MoELayer(nn.Module):
 class AttentionBlock(nn.Module):
     """Attention block where RMSNorm, Dropout, and residuals are applied.
 
-    The Attention Block takes the attention module and applies techniques such as
-    RMSNorm, Dropout, and residuals for smoother gradient flow.
-
     Args:
         d_model (int): Dimensionality of the model's embeddings.
         num_heads (int): Number of attention heads for KV vectors, shared across grouped query heads in GQA.
@@ -807,12 +779,6 @@ class AttentionBlock(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
         """Forward pass of the Attention Block.
 
-        Applies the following sequence of operations:
-        1. RMSNorm on the input.
-        2. Flash Attention (if available) + GQA on the normalized input.
-        3. Dropout on the attention output.
-        4. Adds the result to the original input (residual connection).
-
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
             padding_mask (torch.Tensor): Padding tensor of shape [B, T].
@@ -837,9 +803,6 @@ class AttentionBlock(nn.Module):
 
 class MoEBlock(nn.Module):
     """Mixture of Experts block where RMSNorm, Dropout, and residuals are applied.
-
-    The MoE Block takes the MoE layer and applies techniques such as
-    RMSNorm, Dropout, and residuals for smoother gradient flow.
 
     Args:
         d_model (int): Dimensionality of the model's embeddings.
@@ -871,12 +834,6 @@ class MoEBlock(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the MoE Block.
 
-        Applies the following sequence of operations:
-        1. RMSNorm on the input.
-        2. Pass through MoE layer.
-        3. Dropout on the MoE output.
-        4. Adds the result to the original input (residual connection).
-
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
             padding_mask (torch.Tensor): Padding tensor of shape [B, T].
@@ -892,14 +849,6 @@ class MoEBlock(nn.Module):
 
 class TransformerBlock(nn.Module):
     """Transformer block that will be stacked in the final Transformer class.
-
-    Each transformer block consists of a pass through the attention and
-    Mixture of Experts block.
-
-    Note:
-        Usually the attention/FFN blocks would be done here, but this program
-        already creates the blocks and stores them as separate nn.Modules. Now, the
-        blocks can simply be instantiated and stacked in the Transformer.
 
     Args:
         d_model (int): Dimensionality of the model's embeddings.
@@ -966,10 +915,6 @@ class TransformerBlock(nn.Module):
 class Transformer(nn.Module):
     """Complete Transformer class stacking all decoder blocks.
 
-    This class stacks all of the decoder blocks where each decoder block
-    consists of the attention and MoE blocks. This class also features a generation
-    method, `generate` to autoregressively generate tokens.
-
     Args:
         model_args (ModelArgs): Dataclass containing all model arguments.
     """
@@ -1020,26 +965,10 @@ class Transformer(nn.Module):
 
     def _init_weights(self, module) -> None:
         """Initializes model weights according to layer type.
-
-    Embeddings:
-        Initialized from a normal distribution with mean 0 and std 0.02.
-        This helps maintain stable gradients during early training.
-
-    Linear layers:
-        Initialization depends on the layer's role:
-        - QKV projections, FFN gates and up projections: Xavier uniform,
-          optionally scaled by depth if num_layers > 12.
-        - Attention outputs and FFN down projections: Normal distribution
-          with std scaled by sqrt(2 * num_layers).
-        - LM head: Normal with std 0.02.
-        - Other linear layers: Xavier uniform.
-
-    Biases:
-        Set to zero if present.
-
-    RMSNorm:
-        Weight (scaling factor) initialized to 1.0.
-    """
+        
+        Args:
+            module: PyTorch module to be initialized.
+        """
         num_layers = self.model_args.num_layers
         init_std = 0.02
 
@@ -1092,14 +1021,6 @@ class Transformer(nn.Module):
         use_cache: bool = False
     ) -> Tuple[torch.Tensor, Optional[List[Dict[str, torch.Tensor]]], torch.Tensor]:
         """Forward pass of the entire Transformer.
-
-        This is the final forward pass of the entire Transformer. It takes in a 2 dimensional
-        tensor, `input_ids` and returns the model's unnormalized predictions (logits) as a
-        3 dimensional tensor, `logits`. These logits can then be normalized in the generation
-        method, `generate` where the model can be used to autoregressively predict tokens.
-        Transformer layers will be stacked using gradient checkpointing if available if the
-        gradient_checkpointing flag in the ModelArgs dataclass is set to true. Otherwise, it will
-        simply pass through all transformer layers for `num_layers` times.
 
         Args:
             input_ids (torch.Tensor): Input tensor of shape [B, T].

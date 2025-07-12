@@ -17,9 +17,7 @@ training_args = TrainingArgs()
 
 @dataclass
 class ModelArgs:
-    """
-    Dataclass containing model hyperparameters.
-    """
+    """Dataclass containing model hyperparameters."""
     d_model: int = 1440
     num_heads: int = 24
     query_groups: int = 12
@@ -36,7 +34,7 @@ class ModelArgs:
     gradient_checkpointing: bool = True
     max_batch_size: int = 1024
     num_experts: int = 1
-    top_k: int = 2
+    top_k: int = 1
 
     def __post_init__(self):
         """Post initialization for assertions."""
@@ -50,5 +48,4 @@ class ModelArgs:
             raise ValueError(f"max_batch_size must be >= batch_size, got {training_args.batch_size} < {self.max_batch_size}")
         if self.num_experts < self.top_k:
             raise ValueError(f"num_experts must be >= top_k, got {self.top_k} > {self.num_experts}")
-
-
+        
