@@ -8,9 +8,6 @@ from configs.setup_env import (
 
 from configs.model_args.model_args_medium import ModelArgs
 
-# TODO: remove device_specific_amp
-# TODO: remove xla support
-
 import math
 from typing import Dict, List, Tuple, Optional
 
@@ -506,7 +503,7 @@ class Attention(nn.Module):
                     # If no padding, reshape right away
                     out = out.view(B, T, D)
 
-            # PyTorch SDPA for XLA
+            # Fallback to PyTorch SPDA if no cuda
             else:
                 q = q.transpose(1, 2)
                 k = k.transpose(1, 2)
@@ -1004,10 +1001,9 @@ class Transformer(nn.Module):
         # Language modeling head, bias=False for weight tying
         self.lm_head = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False).to(device)
 
-
         # Initialize KV cache
         self.kv_cache = KVCache(
-            max_batch_size=32,
+            max_batch_size=model_args.max_batch_size,
             max_seq_len=model_args.max_seq_len,
             num_heads=model_args.query_groups,
             head_dim=model_args.d_model // model_args.num_heads,
@@ -1129,7 +1125,8 @@ class Transformer(nn.Module):
 
             # Initialize KV cache outputs as list
             cache_outs = [] if use_cache else None
-            # Initialize total auxiliary loss
+
+            # Initialize aux loss as float32 tensor
             total_aux_loss = torch.tensor(0.0, dtype=torch.float32).to(device)
 
             # Stack transformer layers
