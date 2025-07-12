@@ -10,7 +10,6 @@ from configs.setup_env import (
 
 from configs.training_args import TrainingArgs
 from configs.model_args.model_args_medium import ModelArgs
-from configs.setup_amp import device_specific_amp
 
 import os
 from typing import Dict, List, Tuple, Optional, Union, Generator
@@ -35,14 +34,6 @@ from tqdm import tqdm
 from src.model import Transformer
 from src.text_quality_filter import TextQualityFilter
 from src.deduplication_filter import DeduplicationFilter
-
-# GCP Configuration
-GCP_BUCKET_NAME = "llm-data-storage"
-GCP_BASE_PATH = f"gs://{GCP_BUCKET_NAME}"
-GCP_FILTERED_PATH = f"{GCP_BASE_PATH}/filtered_texts"
-GCP_TOKENIZED_PATH = f"{GCP_BASE_PATH}/tokenized_dataset"
-GCP_CHECKPOINTS_PATH = f"{GCP_BASE_PATH}/checkpoints"
-GCP_FALCON_PATH = f"{GCP_BASE_PATH}/falcon-refinedweb"
 
 class TextDataset(Dataset):
     """Enhanced dataset for GCP compatibility.
