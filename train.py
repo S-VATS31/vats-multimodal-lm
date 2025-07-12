@@ -1,4 +1,4 @@
-# TODO: Change logic to be GCP to local device
+# TODO: Change logic from GCP to local device
 # TODO: Remove all XLA support, GPU only
 # TODO: Add paths for saving dataset/tokenized dataset
 
