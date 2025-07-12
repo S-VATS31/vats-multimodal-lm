@@ -1,13 +1,10 @@
 """
 Medium configuration of model arguments.
 
-This configuration contains ~8 billion parameters.
+This configuration contains:
+    - 811 million parameters.
 
-Note that the training arguments will need to updated 
-based on different ModelArgs hyperparameter values for better
-training and convergence.
-
-NOTE: To essentially "turn off" MoE, set num_experts=1.
+This configuration is too small for MoE, set: top_k, num_experts = 1, 1.
 """
 
 from dataclasses import dataclass
@@ -17,7 +14,7 @@ training_args = TrainingArgs()
 
 @dataclass
 class ModelArgs:
-    """Dataclass containing model hyperparameters."""
+    """Medium configuration of model arguments."""
     d_model: int = 1440
     num_heads: int = 24
     query_groups: int = 12
@@ -33,8 +30,8 @@ class ModelArgs:
     eos_token_id: int = 65535
     gradient_checkpointing: bool = True
     max_batch_size: int = 1024
-    num_experts: int = 1
-    top_k: int = 1
+    num_experts: int = 16
+    top_k: int = 2
 
     def __post_init__(self):
         """Post initialization for assertions."""
@@ -48,4 +45,3 @@ class ModelArgs:
             raise ValueError(f"max_batch_size must be >= batch_size, got {training_args.batch_size} < {self.max_batch_size}")
         if self.num_experts < self.top_k:
             raise ValueError(f"num_experts must be >= top_k, got {self.top_k} > {self.num_experts}")
-        
