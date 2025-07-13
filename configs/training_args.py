@@ -18,6 +18,7 @@ class TrainingArgs:
     pin_memory: bool = True
     persistent_workers: bool = True
     drop_last: bool = True
+    train_ratio: float = 0.95
     grad_accum_steps: int = 4
     logging_steps: int = 100
     eval_steps: int = 500
