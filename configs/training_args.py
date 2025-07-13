@@ -16,6 +16,7 @@ class TrainingArgs:
     num_workers: int = 8
     pin_memory: bool = True
     persistent_workers: bool = True
+    drop_last: bool = True,
     grad_accum_steps: int = 4
     logging_steps: int = 100
     eval_steps: int = 500
