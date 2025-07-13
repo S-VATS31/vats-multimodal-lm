@@ -12,6 +12,7 @@ class TrainingArgs:
     weight_decay: float = 5e-4
     betas: Tuple[float, float] = (0.9, 0.95)
     warmup_ratio: float = 0.05
+    aux_loss_weight: float = 0.01
     eta_min: float = 6e-7
     num_workers: int = 8
     pin_memory: bool = True
