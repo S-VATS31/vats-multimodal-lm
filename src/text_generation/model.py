@@ -1227,10 +1227,11 @@ class Transformer(nn.Module):
                     indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
                     next_token_logits[indices_to_remove] = float('-inf')
 
-                # Sample or select next tokens
+                # Apply sampling
                 if do_sample and temperature > 0:
                     probs = F.softmax(next_token_logits, dim=-1)
                     next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+                # Greedy decoding
                 else:
                     next_tokens = torch.argmax(next_token_logits, dim=-1)
 
