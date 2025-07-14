@@ -2,32 +2,23 @@
 # TODO: Remove all XLA support, GPU only
 # TODO: Add paths for saving dataset/tokenized dataset
 
-from configs.setup_env import (
-    device,
-    dtype,
-    logger,
-)
+from configs.setup_env import device, dtype, logger
 
 from configs.training_args import TrainingArgs
 from configs.model_args.model_args_medium import ModelArgs
 
 import os
-from typing import Dict, List, Tuple, Optional, Union, Generator
+import math
+from typing import Dict, List, Tuple, Optional, Union, Generator, Iterator
 import gc
-import gzip
-import json
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import IterableDataset, DataLoader, random_split
 from torch.optim import AdamW
 from torch.amp import GradScaler
 from transformers import AutoTokenizer
-from datasets import (
-    load_dataset,
-    load_from_disk,
-    Dataset as HFDataset,
-)
+from datasets import load_dataset
 
 from tqdm import tqdm
 
@@ -35,531 +26,365 @@ from src.model import Transformer
 from src.text_quality_filter import TextQualityFilter
 from src.deduplication_filter import DeduplicationFilter
 
-class TextDataset(Dataset):
-    """Enhanced dataset for GCP compatibility.
-    
+class TextDataset(IterableDataset):
+    """Iterable text dataset for loading large datasets.
+
     Args:
-        texts (Optional[List[str]]): List of input texts.
-        tokenizer: HF tokenizer to convert text to input_ids.
-        max_length (Optional[int]): Maximum sequence length.
-        quality_filter (Optional[TextQualityFilter]): Text filtering for cleaner text.
-        dedup_filter (Optional[DeduplicationFilter]): Deduplication filtering to prevent overfitting.
-        skip_filtering (bool): Whether to use pre-filtered or filter new texts.
-        save_filtered_texts_path (Optional[str]): Path to save filtered texts (supports gs:// URLs).
-        save_tokenized_dataset_path (Optional[str]): Path to save tokenized texts (supports gs:// URLs).
+        dataset_name (str): HuggingFace dataset name.
+        tokenizer: HuggingFace tokenizer.
+        max_length (int): Maximum sequence length.
+        quality_filter (Optional[TextQualityFilter]): Text quality filter.
+        dedup_filter (Optional[DeduplicationFilter]): Deduplication filter.
+        buffer_size (int): Size of internal buffer for batch processing filters.
+        max_samples (Optional[int]): Maximum number of samples to process (None means proecss all).
+        skip_filtering (bool): Whether to skip quality/dedup filtering.
+        dataset_config (Optional[str]): Dataset configuration name if needed.
+        split (str): Dataset split to use.
+        streaming (bool): Whether to use streaming mode.
     """
     def __init__(
         self,
-        texts: Optional[List[str]] = None, 
-        tokenizer=None, 
-        max_length: Optional[int] = None, 
-        quality_filter: Optional[TextQualityFilter] = None, 
-        dedup_filter: Optional[DeduplicationFilter] = None, 
+        dataset_name: str,
+        tokenizer,
+        max_length: int,
+        quality_filter: Optional[TextQualityFilter] = None,
+        dedup_filter: Optional[DeduplicationFilter] = None,
+        buffer_size: int = 1000,
+        max_samples: Optional[int] = None,
         skip_filtering: bool = False,
-        save_filtered_texts_path: Optional[str] = None,
-        save_tokenized_dataset_path: Optional[str] = None,
+        dataset_config: Optional[str] = None,
+        split: str = "train",
+        streaming: bool = True,
     ):
+        self.dataset_name = dataset_name
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.quality_filter = quality_filter
         self.dedup_filter = dedup_filter
-        self.gcs_client = storage.Client()
+        self.buffer_size = buffer_size
+        self.max_samples = max_samples
+        self.skip_filtering = skip_filtering
+        self.dataset_config = dataset_config
+        self.split = split
+        self.streaming = streaming
+
+        # Prepare target length for padding
+        self.target_length = max_length - 1 # Account for shifting for causal LM
         
-        # Filtering step
-        if skip_filtering:
-            logger.info("Skipping filtering step - using pre-filtered texts")
-            self.processed_texts = texts
-        else:
-            logger.info("Filtering texts in batches")
-            self.processed_texts = self._process_texts_in_chunks(texts)
-            logger.info(f"Kept {len(self.processed_texts)} texts after filtering from {len(texts)} original")
-
-            # Save filtered texts
-            if save_filtered_texts_path is not None:
-                try:
-                    hf_dataset = HFDataset.from_dict({"text": self.processed_texts})
-                    self._save_dataset_to_path(hf_dataset, save_filtered_texts_path)
-                    logger.info(f"Saved filtered texts to {save_filtered_texts_path}")
-                except Exception as e:
-                    logger.error(f"Failed to save filtered texts: {e}")
-
-        # Tokenization and saving
-        if save_tokenized_dataset_path is not None:
-            try:
-                logger.info("Tokenizing and saving dataset...")
-                self._tokenize_and_save(self.processed_texts, save_tokenized_dataset_path)
-            except Exception as e:
-                logger.error(f"Tokenization failed: {e}")
-                raise e
+        logger.info(f"Initialized TextDataset with streaming={streaming}")
+        logger.info(f"Dataset: {dataset_name}, Max length: {max_length}")
     
-        # Optional for __getitem__ usage
-        self.tokenized_texts = None
+    def load_dataset(self):
+        """Load the raw dataset from HuggingFace."""
+        try:
+            if self.dataset_config is not None:
+                # Dataset config given
+                dataset = load_dataset(
+                    self.dataset_name,
+                    self.dataset_config,
+                    split=self.split,
+                    streaming=self.streaming,
+                    trust_remote_code=True
+                )
+            else:
+                # No dataset config given
+                dataset = load_dataset(
+                    self.dataset_name,
+                    split=self.split,
+                    streaming=self.streaming,
+                    trust_remote_code=True
+                )
+            return dataset
+        except Exception as e:
+            logger.error(f"Failed to load dataset {self.dataset_name}: {e}")
+            raise
 
-    def _is_gcs_path(self, path: str) -> bool:
-        """Check if path is a Google Cloud Storage path."""
-        return path is not None and path.startswith('gs://')
+    def process_batch(self, texts: List[str]) -> List[str]:
+        """Process a batch of texts through quality and dedup filters.
 
-    def _parse_gcs_path(self, gcs_path: str) -> tuple:
-        """Parse GCS path into bucket and blob name."""
-        if not gcs_path.startswith('gs://'):
-            raise ValueError(f"Invalid GCS path: {gcs_path}")
-        
-        path_parts = gcs_path[5:].split('/', 1)
-        bucket_name = path_parts[0]
-        blob_name = path_parts[1] if len(path_parts) > 1 else ""
-        
-        return bucket_name, blob_name
+        Args:
+            texts (List[str]): All texts processed as a list.
 
-    def _save_dataset_to_path(self, dataset: HFDataset, path: str):
-        """Save dataset to local path or GCS bucket."""
-        if self._is_gcs_path(path):
-            # Save to GCS
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_dataset_path = os.path.join(temp_dir, "dataset")
-                dataset.save_to_disk(temp_dataset_path)
-                self._upload_directory_to_gcs(temp_dataset_path, path)
-        else:
-            # Save locally
-            dataset.save_to_disk(path)
+        Returns:
+            List[str]: Filtered and deduplicated texts if filtering is skipped.
+        """
+        # No filtering, return texts
+        if self.skip_filtering:
+            return texts
 
-    def _upload_directory_to_gcs(self, local_dir: str, gcs_path: str):
-        """Upload a directory to Google Cloud Storage."""
-        bucket_name, blob_prefix = self._parse_gcs_path(gcs_path)
-        bucket = self.gcs_client.bucket(bucket_name)
-        
-        for root, _, files in os.walk(local_dir):
-            for file in files:
-                local_file_path = os.path.join(root, file)
-                relative_path = os.path.relpath(local_file_path, local_dir)
-                blob_name = os.path.join(blob_prefix, relative_path).replace('\\', '/')
-                
-                blob = bucket.blob(blob_name)
-                blob.upload_from_filename(local_file_path)
-                logger.info(f"Uploaded {local_file_path} to gs://{bucket_name}/{blob_name}")
+        # Convert to HF dataset format for batch processing
+        from datasets import Dataset as HFDataset
+        batch_dataset = HFDataset.from_dict({"text": texts})
 
-    def _download_directory_from_gcs(self, gcs_path: str, local_dir: str) -> None:
-        """Download a directory from Google Cloud Storage."""
-        bucket_name, blob_prefix = self._parse_gcs_path(gcs_path)
-        bucket = self.gcs_client.bucket(bucket_name)
-        
-        # List all blobs with the prefix
-        blobs = bucket.list_blobs(prefix=blob_prefix)
-        
-        for blob in blobs:
-            # Skip directories (blobs ending with '/')
-            if blob.name.endswith('/'):
-                continue
-                
-            # Create local file path
-            relative_path = os.path.relpath(blob.name, blob_prefix)
-            local_file_path = os.path.join(local_dir, relative_path)
-            
-            # Create directories if they don't exist
-            os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
-            
-            # Download the blob
-            blob.download_to_filename(local_file_path)
-            logger.info(f"Downloaded gs://{bucket_name}/{blob.name} to {local_file_path}")
-
-    def _process_texts_in_chunks(self, texts: List[str], batch_size: int = 100000) -> List[str]:
-        """Efficient batch processing for quality + dedup filtering."""
-        filtered = []
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i+batch_size]
-            dataset = HFDataset.from_dict({"text": batch})
-
-            dataset = dataset.map(
+        # Apply quality filter
+        if self.quality_filter:
+            batch_dataset = batch_dataset.map(
                 self.quality_filter,
                 batched=True,
                 batch_size=512,
-                num_proc=4,
+                num_proc=(os.cpu_count() or 8), # or is for case where os.cpu_count()=None
                 desc="Quality filtering",
             ).filter(lambda x: x["text"] is not None)
-
-            dataset = dataset.map(
+        
+        # Apply deduplication filter
+        if self.dedup_filter:
+            batch_dataset = batch_dataset.map(
                 self.dedup_filter,
                 batched=True,
                 batch_size=512,
-                num_proc=1,
+                num_proc=1, # Single threading for deduplicatoin
                 desc="Deduplication",
             ).filter(lambda x: x["text"] is not None)
+        
+        return batch_dataset["text"]
+    
+    def tokenize(self, text: str) -> Optional[Dict[str, torch.Tensor]]:
+        """Tokenize a single text and format for causal language modeling.
+        
+        Args:
+            text (str): String of input text.
 
-            filtered.extend(dataset["text"])
-        return filtered
-
-    def _tokenize_and_save(self, texts: List[str], save_path: str):
-        """Tokenize texts and save the dataset."""
-        # Check if final dataset already exists
-        if self._dataset_exists(save_path):
-            logger.info(f"Final dataset already exists at {save_path}, skipping tokenization")
-            return
-
-        logger.info(f"Starting tokenization of {len(texts):,} texts...")
-
-        # Tokenize all texts in batches
-        all_tokenized_data = []
-        batch_size = 5000  # Process in batches to manage memory
-
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i:i+batch_size]
-
-            # Tokenize batch
-            tokenized_batch = self.tokenizer(
-                batch_texts,
+        Returns:
+            Optional[Dict[str, torch.Tensor]]: Dictionary containing input_ids, labels, and attention_mask.
+        """
+        try:
+            # Tokenize the text
+            tokens = self.tokenizer(
+                text,
                 truncation=True,
                 padding=False,
                 add_special_tokens=True,
                 return_attention_mask=False,
             )["input_ids"]
-
-            # Process each tokenized sequence
-            for tokens in tokenized_batch:
-                # Add EOS token if not present
-                if tokens[-1] != self.tokenizer.eos_token_id:
-                    tokens.append(self.tokenizer.eos_token_id)
-
-                # Skip very short sequences
-                if len(tokens) < 10:
-                    continue
-
-                # Truncate if too long
-                if len(tokens) > self.max_length:
-                    tokens = tokens[:self.max_length]
-
-                # Create input_ids and labels for causal LM
-                input_ids = tokens[:-1]
-                labels = tokens[1:]
-
-                # Pad to target length
-                target_length = self.max_length - 1
-                if len(input_ids) < target_length:
-                    pad_length = target_length - len(input_ids)
-                    input_ids.extend([self.tokenizer.pad_token_id] * pad_length)
-                    labels.extend([-100] * pad_length)
-
-                # Create attention mask
-                attention_mask = [1.0] * (len(tokens) - 1) + [0.0] * (target_length - (len(tokens) - 1))
-
-                all_tokenized_data.append({
-                    'input_ids': input_ids,
-                    'attention_mask': attention_mask,
-                    'labels': labels,
-                })
-
-            # Log progress every 10 batches
-            if (i // batch_size) % 10 == 0:
-                logger.info(f"Processed {i + len(batch_texts):,} texts... (Current samples: {len(all_tokenized_data):,})")
-
-        # Create and save the final dataset
-        if all_tokenized_data:
-            logger.info(f"Creating final dataset with {len(all_tokenized_data):,} samples...")
-            final_dataset = HFDataset.from_list(all_tokenized_data)
             
-            self._save_dataset_to_path(final_dataset, save_path)
-            logger.info(f"Successfully saved tokenized dataset to {save_path}")
+            # Add EOS token if not present
+            if tokens[-1] != self.tokenizer.eos_token_id:
+                tokens.append(self.tokenizer.eos_token_id)
             
-            # Clean up memory
-            del final_dataset
-            del all_tokenized_data
-            gc.collect()
-        else:
-            logger.warning("No data was processed - all_tokenized_data is empty")
-
-    def _dataset_exists(self, path: str) -> bool:
-        """Check if dataset exists at the given path."""
-        if self._is_gcs_path(path):
-            # Check if GCS path exists
-            bucket_name, blob_prefix = self._parse_gcs_path(path)
-            bucket = self.gcs_client.bucket(bucket_name)
+            # Skip very short sequences
+            if len(tokens) < 10:
+                return None
             
-            # Check if any blobs exist with this prefix
-            blobs = list(bucket.list_blobs(prefix=blob_prefix, max_results=1))
-            return len(blobs) > 0
-        else:
-            # Check if local path exists
-            return os.path.exists(path)
+            # Truncate if too long
+            if len(tokens) > self.max_length:
+                tokens = tokens[:self.max_length]
+            
+            # Create input_ids and labels for causal LM
+            input_ids = tokens[:-1]
+            labels = tokens[1:]
+            
+            # Pad to target length
+            if len(input_ids) < self.target_length:
+                pad_length = self.target_length - len(input_ids)
+                input_ids.extend([self.tokenizer.pad_token_id] * pad_length)
+                labels.extend([-100] * pad_length) # -100 is ignored in loss
+            
+            # Create attention mask
+            real_length = min(len(tokens) - 1, self.target_length)
+            attention_mask = [1.0] * real_length + [0.0] * (self.target_length - real_length)
+            
+            return {
+                'input_ids': torch.tensor(input_ids, dtype=torch.long),
+                'attention_mask': torch.tensor(attention_mask, dtype=torch.float),
+                'labels': torch.tensor(labels, dtype=torch.long),
+            }
+            
+        except Exception as e:
+            logger.warning(f"Failed to tokenize text: {e}")
+            return None
 
-    def __len__(self) -> int:
-        """Get the length of all tokenized texts."""
-        if self.tokenized_texts is not None:
-            return len(self.tokenized_texts)
-        raise NotImplementedError("Dataset length unknown. Load a saved dataset or use custom logic.")
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """Function for allowing indexing in DataLoader."""
-        if self.tokenized_texts is None:
-            raise ValueError("tokenized_texts not loaded. Load from disk or fill manually.")
-
-        tokens = self.tokenized_texts[idx]
-
-        # Handle minimum length
-        if len(tokens) < 2:
-            tokens = tokens + [self.tokenizer.pad_token_id] * (2 - len(tokens))
-        if len(tokens) > self.max_length:
-            tokens = tokens[:self.max_length]
-
-        # Create input_ids and labels for causal LM
-        input_ids = tokens[:-1]
-        labels = tokens[1:]
-
-        # Pad to target length
-        target_length = self.max_length - 1
-        if len(input_ids) < target_length:
-            pad_length = target_length - len(input_ids)
-            input_ids.extend([self.tokenizer.pad_token_id] * pad_length)
-            labels.extend([-100] * pad_length)
-
-        # Convert to LongTensors (int64)
-        input_ids = torch.tensor(input_ids, dtype=torch.int64)
-        labels = torch.tensor(labels, dtype=torch.int64)
-
-        # Create attention mask
-        real_length = min(len(tokens) - 1, target_length)
-        attention_mask = [1.0] * real_length + [0.0] * (target_length - real_length)
-
-        return {
-            'input_ids': input_ids,
-            'labels': labels,
-            'attention_mask': attention_mask
-        }
-
-def download_falcon_refinedweb(
-    max_samples: Optional[int] = None,
-    batch_size: int = 1000,
-    compress: bool = True,
-) -> str:
-    """Download and process Falcon RefinedWeb dataset, streaming directly to GCS bucket."""
-    try:
-        # Initialize GCS client
-        client = storage.Client()
-        bucket = client.bucket(GCP_BUCKET_NAME)
+    def worker_info(self) -> Tuple[int, int]:
+        """Get worker information for multi-worker DataLoader support.
         
-        # Load Falcon RefinedWeb dataset
-        dataset = load_dataset(
-            "tiiuae/falcon-refinedweb",
-            split="train",
-            streaming=True,
-            trust_remote_code=True
-        )
-
-        logger.info(f"Starting Falcon RefinedWeb download and streaming to {GCP_FALCON_PATH}")
-
-        # Initialization
-        batch_texts = []
-        file_counter = 0
-        total_samples = 0
-
-        # Create file extension based on compression
-        file_ext = ".jsonl.gz" if compress else ".jsonl"
+        Returns:
+            Tuple[int, int]: A tuple containing worker id and and number of workers.
+        """
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            # Single worker
+            return 0, 1
+        else:
+            # Multiple workers - split data across workers
+            return worker_info.id, worker_info.num_workers
+    
+    def stream_examples(self) -> Generator[Dict[str, torch.Tensor], None, None]:
+        """Stream tokenized examples from the dataset.
         
-        with tqdm(dataset, desc="Processing samples") as pbar:
+        Returns:
+            Generator[Dict[str, torch.Tensor], None, None]: Generator to lazily load examples into memory.
+        """
+        worker_id, num_workers = self.worker_info()
+        
+        # Load raw dataset
+        dataset = self.load_dataset()
+        
+        # Buffer for batch processing filters
+        text_buffer = []
+        sample_count = 0
+        processed_count = 0
+        
+        logger.info(f"Worker {worker_id}/{num_workers} starting to stream examples")
+        
+        try:
             for i, example in enumerate(dataset):
-                if max_samples is not None and i >= max_samples:
+                # Skip examples for other workers
+                if i % num_workers != worker_id:
+                    continue
+                
+                # Check max samples limit
+                if self.max_samples and sample_count >= self.max_samples:
                     break
                 
-                text = example['content'].strip()
+                sample_count += 1
                 
-                # Add to current batch
-                batch_texts.append({
-                    "id": i,
-                    "content": text,
-                    "url": example.get('url', ''),
-                    "timestamp": example.get('timestamp', '')
-                })
+                # Extract text content
+                text = example["text"].strip()
                 
-                # Write batch to GCS when batch_size is reached
-                if len(batch_texts) >= batch_size:
-                    _write_batch_to_gcs(
-                        bucket, 
-                        batch_texts, 
-                        "falcon-refinedweb", 
-                        file_counter, 
-                        file_ext, 
-                        compress
-                    )
+                # Skip empty texts
+                if not text:
+                    continue
+                
+                # Add to buffer for batch processing
+                text_buffer.append(text)
+                
+                # Process buffer when it's full
+                if len(text_buffer) >= self.buffer_size:
+                    processed_texts = self.process_batch(text_buffer)
                     
-                    total_samples += len(batch_texts)
-                    batch_texts = []
-                    file_counter += 1
-                
-                pbar.update(1)
-        
-        # Write remaining samples
-        if batch_texts:
-            _write_batch_to_gcs(
-                bucket, 
-                batch_texts, 
-                "falcon-refinedweb", 
-                file_counter, 
-                file_ext, 
-                compress
-            )
-            total_samples += len(batch_texts)
-        
-        logger.info(f"Successfully streamed {total_samples} samples to {GCP_FALCON_PATH}")
-        
-        # Write metadata file
-        _write_metadata_to_gcs(
-            bucket, 
-            "falcon-refinedweb", 
-            total_samples, 
-            file_counter + 1, 
-            batch_size
-        )
-        
-        return GCP_FALCON_PATH
-
-    except Exception as e:
-        logger.error(f"Failed to process Falcon RefinedWeb: {e}")
-        raise
-
-def _write_batch_to_gcs(
-    bucket: storage.Bucket,
-    batch_texts: list,
-    gcs_path_prefix: str,
-    file_counter: int,
-    file_ext: str,
-    compress: bool
-) -> None:
-    """Write a batch of texts to GCS as JSONL file."""
-    
-    # Create blob path
-    blob_name = f"{gcs_path_prefix}/batch_{file_counter:06d}{file_ext}"
-    blob = bucket.blob(blob_name)
-    
-    # Prepare data as JSONL
-    jsonl_data = '\n'.join(json.dumps(item) for item in batch_texts)
-    
-    # Compress if requested
-    if compress:
-        data_bytes = gzip.compress(jsonl_data.encode('utf-8'))
-        content_type = "application/gzip"
-    else:
-        data_bytes = jsonl_data.encode('utf-8')
-        content_type = "application/json"
-    
-    # Upload to GCS
-    blob.upload_from_string(
-        data_bytes,
-        content_type=content_type
-    )
-    
-    logger.debug(f"Uploaded batch {file_counter} with {len(batch_texts)} samples to {blob_name}")
-
-def _write_metadata_to_gcs(
-    bucket: storage.Bucket,
-    gcs_path_prefix: str,
-    total_samples: int,
-    num_files: int,
-    batch_size: int
-) -> None:
-    """Write metadata about the dataset to GCS."""
-    
-    metadata = {
-        "dataset": "falcon-refinedweb",
-        "total_samples": total_samples,
-        "num_files": num_files,
-        "batch_size": batch_size,
-        "format": "jsonl",
-        "compressed": True
-    }
-    
-    blob_name = f"{gcs_path_prefix}/metadata.json"
-    blob = bucket.blob(blob_name)
-    blob.upload_from_string(
-        json.dumps(metadata, indent=2),
-        content_type="application/json"
-    )
-    
-    logger.info(f"Uploaded metadata to {blob_name}")
-
-def read_falcon_refinedweb_from_gcs() -> Generator[dict, None, None]:
-    """Read Falcon RefinedWeb data from GCS bucket."""
-    client = storage.Client()
-    bucket = client.bucket(GCP_BUCKET_NAME)
-    
-    # List all batch files
-    blobs = bucket.list_blobs(prefix="falcon-refinedweb/batch_")
-    
-    for blob in blobs:
-        if blob.name.endswith('.jsonl.gz'):
-            # Download and decompress
-            compressed_data = blob.download_as_bytes()
-            jsonl_data = gzip.decompress(compressed_data).decode('utf-8')
+                    # Tokenize and yield each processed text
+                    for processed_text in processed_texts:
+                        tokenized = self.tokenize(processed_text)
+                        if tokenized is not None:
+                            processed_count += 1
+                            yield tokenized
+                    
+                    # Clear buffer
+                    text_buffer = []
+                    
+                    # Log progress periodically
+                    if processed_count % 1000 == 0:
+                        logger.info(f"Worker {worker_id}: processed {processed_count} examples")
             
-            # Parse JSONL
-            for line in jsonl_data.strip().split('\n'):
-                if line:
-                    yield json.loads(line)
-        elif blob.name.endswith('.jsonl'):
-            # Download uncompressed
-            jsonl_data = blob.download_as_text()
-            
-            # Parse JSONL
-            for line in jsonl_data.strip().split('\n'):
-                if line:
-                    yield json.loads(line)
+            # Process remaining texts in buffer
+            if text_buffer:
+                processed_texts = self.process_batch(text_buffer)
+                for processed_text in processed_texts:
+                    tokenized = self.tokenize(processed_text)
+                    if tokenized is not None:
+                        processed_count += 1
+                        yield tokenized
+        
+        except Exception as e:
+            logger.error(f"Error in worker {worker_id}: {e}")
+            raise
+        
+        logger.info(f"Worker {worker_id} finished: {processed_count} examples yielded from {sample_count} samples")
+    
+    def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
+        """Iterator function for IterableDataset.
+        
+        Returns:
+            Iterator[Dict[str, torch.Tensor]]: Returning tokenized examples in the form of input_ids.
+        """
+        return self.stream_examples()
 
-def load_tokenized_dataset_from_gcs(
-    gcs_path: str,
+def create_dataloader(
+    dataset_name: str,
+    tokenizer,
     max_length: int,
-    tokenizer
-) -> 'TokenizedDataset':
-    """Load tokenized dataset from GCS."""
-    # Download dataset to temporary directory
-    with tempfile.TemporaryDirectory() as temp_dir:
-        dataset_instance = TextDataset(
-            texts=None,
-            tokenizer=tokenizer,
-            max_length=max_length
-        )
-        
-        dataset_instance._download_directory_from_gcs(gcs_path, temp_dir)
-        
-        # Load the dataset
-        dataset = load_from_disk(temp_dir)
-        
-        # Create a simple dataset wrapper
-        return TokenizedDataset(dataset, max_length)
+    training_args: TrainingArgs,
+    quality_filter: Optional[TextQualityFilter] = None,
+    dedup_filter: Optional[DeduplicationFilter] = None,
+    max_samples: Optional[int] = None,
+    **dataset_kwargs
+) -> DataLoader:
+    """
+    Create a DataLoader with lazy-loading TextDataset.
+    
+    Args:
+        dataset_name (str): HuggingFace dataset name.
+        tokenizer: HuggingFace tokenizer.
+        max_length (int): Maximum sequence length.
+        batch_size (int): Batch size.
+        quality_filter (Optional[TextQualityFilter]): Text quality filter.
+        dedup_filter (Optional[DeduplicationFilter]): Deduplication filter.
+        max_samples (int): Maximum number of samples to process.
+        num_workers (int): Number of DataLoader workers.
+        pin_memory (bool): Whether to pin memory.
+        drop_last (bool): Whether to drop last incomplete batch.
+        **dataset_kwargs: Additional arguments for TextDataset.
 
-class TokenizedDataset(Dataset):
-    """Simple wrapper for pre-tokenized dataset."""
+    Returns:
+        DataLoader: DataLoader with lazy-loading dataset.
+    """
+    # Initialize TextDataset
+    dataset = TextDataset(
+        dataset_name=dataset_name,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        quality_filter=quality_filter,
+        dedup_filter=dedup_filter,
+        max_samples=max_samples,
+        **dataset_kwargs
+    )
+
+    # Create dataloader
+    dataloader = DataLoader(
+        dataset,
+        batch_size=training_args.batch_size,
+        num_workers=training_args.num_workers,
+        pin_memory=training_args.pin_memory,
+        drop_last=training_args.drop_last,
+    ) # shuffle=True not supported for IterableDataset
     
-    def __init__(self, hf_dataset, max_length):
-        self.dataset = hf_dataset
-        self.max_length = max_length
-    
-    def __len__(self):
-        return len(self.dataset)
-    
-    def __getitem__(self, idx):
-        item = self.dataset[idx]
-        return {
-            'input_ids': torch.tensor(item['input_ids'], dtype=torch.int64),
-            'labels': torch.tensor(item['labels'], dtype=torch.int64),
-            'attention_mask': torch.tensor(item['attention_mask'], dtype=torch.float32)
-        }
+    return dataloader
 
 def compute_loss(
     logits: torch.Tensor,
     labels: torch.Tensor, 
+    training_args: TrainingArgs,
     aux_loss: Optional[torch.Tensor] = None, 
-    aux_loss_weight: float = 0.01, 
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute training loss with optional auxiliary loss."""
+    """Compute training loss with optional auxiliary loss.
+    
+    Args:
+        logits (torch.Tensor): Logits tensor of shape [B, T, V].
+        labels (torch.Tensor): Labels tensor of shape [B, T].
+        training_args (TrainingArgs): Training hyperparameters.
+        aux_loss (torch.Tensor): aux_loss scalar tensor.
+    
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Tuple containing total loss, lm loss, aux loss.
+            - torch.Tensor: Total loss.
+            - torch.Tensor: Language modeling loss.
+            - torch.Tensor: Auxiliary loss.
+    """
     # Shift logits/labels for CE
-    shift_logits = logits.view(-1, logits.size(-1))
-    shift_labels = labels.view(-1)
+    shift_logits = logits.contiguous().view(-1, logits.size(-1))
+    shift_labels = labels.contiguous().view(-1)
 
     # Tell model to ignore value of -100
-    loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-    lm_loss = loss_fct(shift_logits, shift_labels)
+    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    lm_loss = criterion(shift_logits, shift_labels)
 
     if aux_loss is not None:
-        total_loss = lm_loss + aux_loss_weight * aux_loss
+        # Calculate total loss if aux_loss given
+        total_loss = lm_loss + training_args.aux_loss_weight * aux_loss
         return total_loss, lm_loss, aux_loss
     else:
+        # Initialize aux loss as 0 tensor
         return lm_loss, lm_loss, torch.tensor(0.0, device=lm_loss.device)
+
+def compute_perplexity(loss: float) -> float:
+    """Compute perplexity using the LM loss.
+    
+    Args:
+        loss (float): LM loss used to compute perplexity.
+
+    Returns:
+        float: Perplexity computed by taking the exponent of the loss.
+    """
+    return math.exp(loss)
 
 def train_step(
     model: nn.Module,
@@ -570,23 +395,37 @@ def train_step(
     step: int,
     scaler: Optional[GradScaler] = None,
 ) -> Dict[str, Union[float, bool]]:
-    """Single training step with AMP support."""
+    """Single training step with AMP support.
+    
+    Args:
+        model (nn.Module): Transformer architecture.
+        batch (Dict[str, torch.Tensor]): Dictionary containing input_ids, labels, and attention mask.
+        optimizer: PyTorch optimizer.
+        training_args (TrainingArgs): Training hyperparameters.
+        device (torch.device): Accelerator at use.
+        step (int): Current step during training.
+        scaler (Optional[GradScaler]): Gradient scaling for bf16/fp16 gradients.
+
+    Returns:
+        Dict[str, Union[float, bool]]: Dictionary containing loss and whether the step was a success.
+    """
     try:
-        input_ids = batch['input_ids'].to(device, non_blocking=True)
-        labels = batch['labels'].to(device, non_blocking=True)
-        attention_mask = batch['attention_mask'].to(device, non_blocking=True)
+        # Get input_ids, labels and attention mask
+        input_ids = batch['input_ids'].to(device, non_blocking=training_args.pin_memory)
+        labels = batch['labels'].to(device, non_blocking=training_args.pin_memory)
+        attention_mask = batch['attention_mask'].to(device, non_blocking=training_args.pin_memory)
 
         # Forward pass with AMP
         if scaler is not None:
             with torch.amp.autocast(device_type=device.type, dtype=dtype):
                 logits, _, aux_loss = model(input_ids, padding_mask=attention_mask, use_cache=False)
-                loss, lm_loss, aux_loss_val = compute_loss(logits, labels, aux_loss, aux_loss_weight=0.01)
-                loss = loss / training_args.grad_accum_steps
+                loss, lm_loss, aux_loss_val = compute_loss(logits, labels, training_args, aux_loss)
+                loss = loss / training_args.grad_accum_steps # Scale loss by gradient accumulation steps
         else:
             # Standard FP32 forward pass
             logits, _, aux_loss = model(input_ids, padding_mask=attention_mask, use_cache=False)
-            loss, lm_loss, aux_loss_val = compute_loss(logits, labels, aux_loss, aux_loss_weight=0.01)
-            loss = loss / training_args.grad_accum_steps
+            loss, lm_loss, aux_loss_val = compute_loss(logits, labels, training_args, aux_loss)
+            loss = loss / training_args.grad_accum_steps # Scale loss by gradient accumulation steps
 
         # Backward pass with gradient scaling
         if scaler is not None:
@@ -601,9 +440,10 @@ def train_step(
             'success': True
         }
 
+    # Catch OOM error
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
-            logger.warning(f"OOM at step {step}.")
+            logger.warning(f"OOM at step {step}, emptying CUDA cache.")
             if device.type == "cuda":
                 torch.cuda.empty_cache()
             optimizer.zero_grad()
@@ -611,9 +451,6 @@ def train_step(
         else:
             logger.error(f"Training step failed: {e}")
             return {'success': False, 'error': str(e)}
-    except Exception as e:
-        logger.error(f"Exception occurred during training step {step}: {e}")
-        return {'success': False, 'error': str(e)}
 
 def train_epoch(
     model: nn.Module,
@@ -625,7 +462,24 @@ def train_epoch(
     epoch: int, 
     scaler: Optional[GradScaler] = None,
 ) -> Tuple[float, float, float]:
-    """Train for one epoch with AMP support."""
+    """Train for one epoch with AMP support.
+    
+    Args:
+        model (nn.Module): Transformer architecture.
+        dataloader (DataLoader): PyTorch DataLoader.
+        optimizer: PyTorch optimizer.
+        scheduler: PyTorch scheduler.
+        training_args (TrainingArgs): Training hyperparameters.
+        device (torch.device): Accelerator at use.
+        epoch (int): Current epoch during training.
+        scaler (Optional[GradScaler]): Gradient scaler to scale bf16/fp16 gradients.
+
+    Returns:
+        Tuple[float, float, float]: Tuple containing total loss, lm loss, and aux loss.
+            - float: Total loss scaled by succesful steps.
+            - float: LM loss scaled by succesful steps.
+            - float: Aux loss scaled by succesful steps.
+    """
     model.train()
 
     # Initialization
@@ -635,12 +489,15 @@ def train_epoch(
     successful_steps = 0
     skipped_steps = 0
 
+    # Set up pbar
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}")
     optimizer.zero_grad()
 
+    # Loop through all steps
     for step, batch in enumerate(progress_bar):
         result = train_step(model, batch, optimizer, training_args, device, step, scaler)
 
+        # If step was successful, accumulate loss
         if result['success']:
             total_loss += result['loss']
             total_lm_loss += result['lm_loss']
@@ -648,18 +505,22 @@ def train_epoch(
             successful_steps += 1
         else:
             skipped_steps += 1
-            if skipped_steps > len(dataloader) * 0.2:
+            # If 10% of steps fail, stop epoch
+            if skipped_steps > len(dataloader) * 0.1:
                 logger.error("Too many failed steps, stopping epoch")
                 break
 
         # Gradient accumulation and optimizer step
         if (step + 1) % training_args.grad_accum_steps == 0:
             if successful_steps > 0:
+                # AMP available
                 if scaler is not None:
                     scaler.unscale_(optimizer)
+                    # Clip L2 Norm
                     nn.utils.clip_grad_norm_(model.parameters(), training_args.clip_grad_norm)
                     scaler.step(optimizer)
                     scaler.update()
+                # No AMP available
                 else:
                     nn.utils.clip_grad_norm_(model.parameters(), training_args.clip_grad_norm)
                     optimizer.step()
@@ -674,26 +535,29 @@ def train_epoch(
             lr = scheduler.get_last_lr()[0]
 
             progress_bar.set_postfix({
-                'loss': f'{avg_loss:.4f}',
-                'lm_loss': f'{avg_lm_loss:.4f}',
-                'aux_loss': f'{avg_aux_loss:.4f}',
-                'lr': f'{lr:.2e}',
-                'skipped': skipped_steps
+                "loss": f"{avg_loss:.4f}",
+                "lm_loss": f"{avg_lm_loss:.4f}",
+                "aux_loss": f"{avg_aux_loss:.4f}",
+                "lr": f"{lr:.2e}",
+                "skipped_steps": skipped_steps
             })
 
     # Handle remaining gradients
     if len(dataloader) % training_args.grad_accum_steps != 0:
         if successful_steps > 0:
+            # AMP available
             if scaler is not None:
                 scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), training_args.clip_grad_norm)
                 scaler.step(optimizer)
                 scaler.update()
+            # AMP not available
             else:
                 nn.utils.clip_grad_norm_(model.parameters(), training_args.clip_grad_norm)
                 optimizer.step()
         optimizer.zero_grad()
 
+    # No succesful steps, all loss = inf
     if successful_steps == 0:
         logger.error("No successful training steps in epoch")
         return float('inf'), float('inf'), float('inf')
@@ -709,20 +573,38 @@ def evaluate_model(
     device: torch.device, 
     max_batches: Optional[int] = None,
 ) -> Tuple[float, float, float]:
-    """Evaluate model with AMP support."""
-    model.eval()
+    """Evaluate model with AMP support.
+    
+    Args:
+        model (nn.Module): Transformer architecture
+        dataloader (DataLoader): PyTorch DataLoader.
+        training_args (TrainingArgs): Training hyperparameters.
+        device (torch.device): Accelerator at use.
+        max_batches (Optional[int]): Max batches to evaluate on.
 
+    Returns:
+    Tuple[float, float, float]: Tuple containing total loss, lm loss, and aux loss.
+        - float: Total loss scaled by succesful steps.
+        - float: LM loss scaled by succesful steps.
+        - float: Aux loss scaled by succesful steps.
+    """
+    model.eval() # No dropout
+
+    # Initialize loss and batches
     total_loss = 0
     total_lm_loss = 0
     total_aux_loss = 0
     successful_batches = 0
 
+    # Turn off gradient tracking for evaluation
     with torch.no_grad():
         for i, batch in enumerate(tqdm(dataloader, desc="Evaluating")):
+            # Break if max batches reached
             if max_batches is not None and i >= max_batches:
                 break
 
             try:
+                # Get input_ids, labels, and attention_mask
                 input_ids = batch['input_ids'].to(device, non_blocking=training_args.pin_memory)
                 labels = batch['labels'].to(device, non_blocking=training_args.pin_memory)
                 attention_mask = batch['attention_mask'].to(device, non_blocking=training_args.pin_memory)
@@ -731,11 +613,13 @@ def evaluate_model(
                     logits, _, aux_loss = model(input_ids, padding_mask=attention_mask, use_cache=False)
                     loss, lm_loss, aux_loss_val = compute_loss(logits, labels, aux_loss)
 
+                # Accumulate loss
                 total_loss += loss.item()
                 total_lm_loss += lm_loss.item()
                 total_aux_loss += aux_loss_val.item()
                 successful_batches += 1
-
+            
+            # Catch OOM error
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
                     logger.warning("OOM during evaluation, skipping batch")
@@ -745,9 +629,8 @@ def evaluate_model(
                 else:
                     logger.warning(f"Evaluation error: {e}")
                     continue
-            except Exception as e:
-                logger.error(f"Error occurred during evaluation: {e}")
 
+    # No succesful batches, all loss = inf
     if successful_batches == 0:
         logger.error("No successful evaluation batches")
         return float('inf'), float('inf'), float('inf')
@@ -756,7 +639,7 @@ def evaluate_model(
             total_lm_loss / successful_batches,
             total_aux_loss / successful_batches)
 
-def save_checkpoint_to_gcs(
+def save_checkpoint(
     model: nn.Module,
     optimizer,
     scheduler,
@@ -768,7 +651,23 @@ def save_checkpoint_to_gcs(
     scaler: Optional[GradScaler] = None,
     is_best: bool = False,
 ) -> str:
-    """Save checkpoint to Google Cloud Storage."""
+    """Save checkpoint to .pt file.
+    
+    Args:
+        model (nn.Module): Transformer architecture.
+        optimizer: PyTorch optimizer.
+        scheduler: PyTorch scheduler.
+        epoch (int): Current epoch to save checkpoint to.
+        step (int): Current step to save checkpoint to.
+        loss (float): Current loss to save checkpoint to.
+        training_args (TrainingArgs): Training hyperparameters.
+        model_args (ModelArgs): Model hyperparameters.
+        scaler (Optional[GradScaler]): Save if GradScaler is not None.
+        is_best (bool): Whether the current checkpoint contains the lowest validation loss or not.
+
+    Returns:
+        str: Returns path to save checkpoint so it can be loaded later.
+    """
     try:
         # Create checkpoint data
         checkpoint_data = {
@@ -787,78 +686,56 @@ def save_checkpoint_to_gcs(
             checkpoint_data['scaler_state_dict'] = scaler.state_dict()
         
         # Create filename
-        if is_best:
-            filename = "checkpoint_best.pt"
-        else:
-            filename = f"checkpoint_epoch_{epoch}_step_{step}.pt"
+        filename = "best_model.pt" if is_best else f"checkpoint_step_{step}_epoch{epoch}.pt"
         
-        # Save to temporary file first
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as temp_file:
-            torch.save(checkpoint_data, temp_file.name)
-            temp_path = temp_file.name
+        # Load checkpoint data to filename
+        torch.save(checkpoint_data, filename)
+        logger.info(f"Succesfully saved checkpoint to {filename}")
         
-        # Upload to GCS
-        client = storage.Client()
-        bucket = client.bucket(GCP_BUCKET_NAME)
-        blob_name = f"checkpoints/{filename}"
-        blob = bucket.blob(blob_name)
-        
-        blob.upload_from_filename(temp_path)
-        
-        # Clean up temporary file
-        os.unlink(temp_path)
-        
-        gcs_path = f"gs://{GCP_BUCKET_NAME}/{blob_name}"
-        logger.info(f"Saved checkpoint to {gcs_path}")
-        
-        return gcs_path
-        
-    except Exception as e:
-        logger.error(f"Failed to save checkpoint: {e}")
-        raise
+        return filename
 
-def load_checkpoint_from_gcs(
-    gcs_path: str,
+    except Exception as e:
+        logger.error(f"Failed to save checkpoint as {filename}: {e}")
+        raise # We don't want to load faulty checkpoints, so no return
+
+def load_checkpoint(
+    filename: str,
     model: nn.Module,
     optimizer,
     scheduler,
     scaler: Optional[GradScaler] = None,
     device: torch.device = None,
 ) -> Dict[str, Union[int, float]]:
-    """Load checkpoint from Google Cloud Storage."""
+    """Load checkpoint from saved .pt file.
+    
+    Args:
+        filename (str): Filename where checkpoint is saved.
+        model (nn.Module): Transformer architecture.
+        optimizer: PyTorch optimizer.
+        scheduler: PyTorch scheduler.
+        scaler (Optional[GradScaler]): Gradient scaling for bf16/fp16 gradients.
+        device (torch.device): Accelerator at use.
+
+    Returns:
+        Dict[str, Union[int, float]]: State dict returning current step, epoch, and loss.
+            - int: Current epoch.
+            - int: Current step.
+            - float: Current loss.
+    """
     try:
-        # Parse GCS path
-        if not gcs_path.startswith('gs://'):
-            raise ValueError(f"Invalid GCS path: {gcs_path}")
-        
-        path_parts = gcs_path[5:].split('/', 1)
-        bucket_name = path_parts[0]
-        blob_name = path_parts[1]
-        
-        # Download checkpoint
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as temp_file:
-            blob.download_to_filename(temp_file.name)
-            temp_path = temp_file.name
-        
         # Load checkpoint
-        checkpoint = torch.load(temp_path, map_location=device)
+        checkpoint = torch.load(filename, map_location=device)
         
         # Load states
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         
+        # Load scaler state dict if using AMP
         if scaler is not None and 'scaler_state_dict' in checkpoint:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
         
-        # Clean up temporary file
-        os.unlink(temp_path)
-        
-        logger.info(f"Loaded checkpoint from {gcs_path}")
+        logger.info(f"Succesfully loaded checkpoint from {filename}")
         
         return {
             'epoch': checkpoint['epoch'],
@@ -867,16 +744,23 @@ def load_checkpoint_from_gcs(
         }
         
     except Exception as e:
-        logger.error(f"Failed to load checkpoint: {e}")
+        logger.error(f"Failed to load checkpoint from {filename}: {e}")
         raise
 
-def get_linear_schedule_with_warmup(
-    optimizer,
+def lr_scheduler(
+    optimizer: torch.optim.Optimizer,
     num_warmup_steps: int,
     num_training_steps: int,
     last_epoch: int = -1,
 ) -> torch.optim.lr_scheduler.LambdaLR:
-    """Create a linear learning rate schedule with warmup."""
+    """Create a linear learning rate schedule with warmup.
+    
+    Args:
+        optimizer: PyTorch optimizer.
+        num_warmup_steps (int): Number of warmup steps.
+        num_training_steps (int): Number of training steps.
+        last_epoch (int): Last epoch parameter for LambdaLR.
+    """
     def lr_lambda(current_step: int):
         if current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
@@ -892,7 +776,19 @@ def setup_training_components(
     training_args: TrainingArgs,
     num_training_steps: int,
 ) -> Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler, Optional[GradScaler]]:
-    """Setup optimizer, scheduler, and scaler for training."""
+    """Setup optimizer, scheduler, and scaler for training.
+    
+    Args:
+        model (nn.Module): Transformer architecture.
+        training_args (TrainingArgs): Training hyperparameters.
+        num_training_steps (int): Number of training steps.
+
+    Returns:
+        Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler, Optional[GradScaler]]:
+            - torch.optim.Optimizer: AdamW optimizer.
+            - torch.optim.lr.scheduler._LRScheduler: Custom consine decay lr scheduler.
+            - Optional[GradScaler]: Gradient scaling for bf16/fp16 gradients.
+    """
     # Setup optimizer
     optimizer = AdamW(
         model.parameters(),
@@ -901,10 +797,10 @@ def setup_training_components(
         eps=training_args.epsilon,
         weight_decay=training_args.weight_decay,
     )
-    
+
     # Setup scheduler
     num_warmup_steps = int(training_args.warmup_ratio * num_training_steps)
-    scheduler = get_linear_schedule_with_warmup(
+    scheduler = lr_scheduler(
         optimizer,
         num_warmup_steps=num_warmup_steps,
         num_training_steps=num_training_steps,
@@ -916,36 +812,52 @@ def setup_training_components(
     return optimizer, scheduler, scaler
 
 def main(
+    dataset_name: str,
     resume_from_checkpoint: Optional[str] = None,
     max_samples: Optional[int] = None,
 ) -> None:
-    """Main training loop with GCS integration."""
-    logger.info("Starting training loop...")
+    """Main training loop.
     
+    Args:
+        dataset_name (str): Name of the dataset to be downloaded.
+        resume_from_checkpoint (Optional[str]): File path to resume from checkpoint.
+        max_samples (Optional[int]): Number of samples to download (None for all samples).
+    """
     # Initialize tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("gpt2") # Rust tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
     logger.info(f"Initialized {tokenizer.name_or_path} tokenizer.")
+    # Initialize pad/eos token
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # Inintialize model and training arguments
     model_args = ModelArgs()
-    model_args.vocab_size = tokenizer.vocab_size
+    model_args.vocab_size = tokenizer.vocab_size # 32000 for mistral tokenizer
     model_args.pad_token_id = tokenizer.pad_token_id
     model_args.eos_token_id = tokenizer.eos_token_id
 
     training_args = TrainingArgs()
+    logger.info("Initialized model and training arguments.")
 
     # Initialize model
     model = Transformer(model_args).to(device)
+    logger.info("Initialized model")
+
+    # Count parameters (will be logged)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     
     # Setup filters
     quality_filter = TextQualityFilter()
     dedup_filter = DeduplicationFilter()
+    logger.info("Initialized text quality and deduplication filters.")
     
     # Check if we need to download and process data
+    # TODO: remove and fix this
     if not os.path.exists(GCP_TOKENIZED_PATH.replace('gs://', '').replace(GCP_BUCKET_NAME + '/', '')):
-        logger.info("Downloading and processing Falcon RefinedWeb dataset...")
+        logger.info(f"Downloading and processing {dataset_name} dataset...")
         
         # Download raw data
         download_falcon_refinedweb(max_samples=max_samples)
@@ -983,68 +895,125 @@ def main(
         model_args.max_position_embeddings,
         tokenizer
     )
-    
-    # Create data loader
-    dataloader = DataLoader(
-        dataset,
-        batch_size=training_args.batch_size,
-        shuffle=True,
-        num_workers=training_args.num_workers,
-        pin_memory=training_args.pin_memory,
-        drop_last=True,
+
+    # Split dataset into training and validation datasets
+    train_size = int(training_args.train_ratio * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+
+    # Create train loader
+    train_loader = create_dataloader(
+        train_dataset, tokenizer, model_args.max_seq_len, training_args,
+        quality_filter, dedup_filter, max_samples=None
+    )
+
+    # Create validation loader
+    val_loader = create_dataloader(
+        val_dataset, tokenizer, model_args.max_seq_len, training_args,
+        quality_filter, dedup_filter, max_samples=None
     )
     
     # Calculate training steps
-    num_training_steps = len(dataloader) * training_args.epochs // training_args.grad_accum_steps
+    num_training_steps = len(train_loader) * training_args.epochs // training_args.grad_accum_steps
     
     # Setup training components
     optimizer, scheduler, scaler = setup_training_components(
         model, training_args, num_training_steps
     )
-    
-    # Resume from checkpoint if provided
+
+    # Initialize start epoch and loss
     start_epoch = 0
     best_loss = float('inf') # Initialize loss
-    
-    if resume_from_checkpoint is not None:
-        logger.info(f"Resuming from checkpoint: {resume_from_checkpoint}")
-        checkpoint_info = load_checkpoint_from_gcs(
-            resume_from_checkpoint, model, optimizer, scheduler, scaler, device
-        )
-        start_epoch = checkpoint_info['epoch'] + 1
-        best_loss = checkpoint_info['loss']
-    
+
+    # Resume from checkpoint if provided
+    try:
+        if resume_from_checkpoint is not None:
+            logger.info(f"Resuming from checkpoint: {resume_from_checkpoint}")
+            checkpoint_info = load_checkpoint(
+                resume_from_checkpoint, model, optimizer, scheduler, scaler, device
+            )
+            start_epoch = checkpoint_info['epoch'] + 1
+            best_loss = checkpoint_info['loss']
+    except Exception as e:
+        logger.info(f"Failed to resume from {resume_from_checkpoint}: {e}")
+
+    # Dataset info
+    logger.info("DATASET INFORMATION")
+    logger.info("=" * 50)
+    logger.info(f"Training dataset: {dataset_name}")
+    logger.info(f"Training examples: {len(train_loader)}")
+    logger.info(f"Validation examples: {len(val_loader)}\n")
+
+    # Tokenization info
+    logger.info("TOKENIZATION INFORMATION")
+    logger.info("=" * 50)
+    logger.info(f"Pad token: {model_args.pad_token} | EOS token: {model_args.eos_token}")
+    logger.info(f"Pad token id: {model_args.pad_token_id} | EOS token id: {model_args.eos_token_id}")
+    logger.info(f"Vocab size: {model_args.vocab_size}\n")
+
+    # Model info
+    logger.info("MODEL INFORMATION")
+    logger.info("=" * 50)
+    logger.info(f"Total parameters: {total_params:,}")
+    logger.info(f"Trainable parameters: {trainable_params:,}\n")
+
+    # Training components
+    logger.info("TRAINING COMPONENTS")
+    logger.info("=" * 50)
+    logger.info(f"Optimizer: {type(optimizer).__name__}")
+    logger.info(f"Scheduler: {type(scheduler).__name__}")
+    logger.info(f"Scaler available: {bool(scaler)}\n") # If device.type == cuda: True, else scaler=None: False
+
+    # Training steps/epochs
+    logger.info("TRAINING LENGTHS")
+    logger.info("=" * 50)
+    logger.info(f"Number of Epochs: {training_args.epochs}")
+    logger.info(f"Number of Steps: {num_training_steps}")
+    logger.info(f"Number of warmup steps: {int(training_args.warmup_ratio * num_training_steps)}\n")
+
     # Training loop
-    logger.info(f"Starting training for {training_args.epochs} epochs...")
-    
+    logger.info("Training starting...")
+
     for epoch in range(start_epoch, training_args.epochs):
         logger.info(f"Starting epoch {epoch + 1}/{training_args.epochs}")
-        
+
         # Train for one epoch
         train_loss, train_lm_loss, train_aux_loss = train_epoch(
-            model, dataloader, optimizer, scheduler, training_args, device, epoch, scaler
+            model, train_loader, optimizer, scheduler, training_args, device, epoch, scaler
         )
-        
-        logger.info(f"Epoch {epoch + 1} - Train Loss: {train_loss:.4f}, "
-                   f"LM Loss: {train_lm_loss:.4f}, Aux Loss: {train_aux_loss:.4f}")
-        
-        # Save checkpoint
-        if (epoch + 1) % training_args.save_steps == 0:
-            checkpoint_path = save_checkpoint_to_gcs(
+
+        # Evaluate for one epoch
+        val_loss, val_lm_loss, val_aux_loss = evaluate_model(
+            model, val_loader, training_args, device, training_args.max_eval_batches
+        )
+
+        # Log training loss and perplexity
+        logger.info(f"Epoch {epoch + 1} Training Loss & Perplexity:")
+        logger.info(f"Train Loss: {train_loss:.4f} | Train LM Loss: {train_lm_loss:.4f} | Train Aux Loss: {train_aux_loss:.4f}")
+        logger.info(f"Train Perplexity: {compute_perplexity(train_lm_loss):.4f}")
+
+        # Log validation loss and perplexity
+        logger.info(f"Epoch {epoch + 1} Validation Loss & Perplexity:")
+        logger.info(f"Val Loss: {val_loss:.4f} | Val LM Loss: {val_lm_loss:.4f} | Val Aux Loss: {val_aux_loss:.4f}")
+        logger.info(f"Val Perplexity: {compute_perplexity(val_lm_loss):.4f}")
+
+        # Save regular checkpoint
+        if (epoch + 1) % training_args.save_freq == 0:
+            checkpoint_path = save_checkpoint(
                 model, optimizer, scheduler, epoch, 0, train_loss,
                 training_args, model_args, scaler, is_best=False
             )
             logger.info(f"Saved checkpoint to {checkpoint_path}")
-        
-        # Save best model
-        if train_loss < best_loss:
-            best_loss = train_loss
-            best_checkpoint_path = save_checkpoint_to_gcs(
-                model, optimizer, scheduler, epoch, 0, train_loss,
+
+        # Save best model (lowest validation loss)
+        if val_loss < best_loss:
+            best_loss = val_loss
+            best_checkpoint_path = save_checkpoint(
+                model, optimizer, scheduler, epoch, 0, val_loss,
                 training_args, model_args, scaler, is_best=True
             )
             logger.info(f"New best model saved to {best_checkpoint_path}")
-        
+
         # Clean up GPU memory
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -1052,8 +1021,4 @@ def main(
     logger.info("Training completed!")
 
 if __name__ == "__main__":
-    main(
-        resume_from_checkpoint=None,
-        max_samples=100000, # Limit samples for testing
-    )
-    
+    main()
