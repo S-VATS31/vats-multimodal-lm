@@ -1,7 +1,3 @@
-# TODO: Change logic from GCP to local device
-# TODO: Remove all XLA support, GPU only
-# TODO: Add paths for saving dataset/tokenized dataset
-
 from configs.setup_env import device, dtype, logger
 
 from configs.training_args import TrainingArgs
@@ -10,7 +6,6 @@ from configs.model_args.model_args_medium import ModelArgs
 import os
 import math
 from typing import Dict, List, Tuple, Optional, Union, Generator, Iterator
-import gc
 
 import torch
 import torch.nn as nn
@@ -138,11 +133,12 @@ class TextDataset(IterableDataset):
         
         return batch_dataset["text"]
     
-    def tokenize(self, text: str) -> Optional[Dict[str, torch.Tensor]]:
+    def tokenize(self, text: str, model_args: ModelArgs) -> Optional[Dict[str, torch.Tensor]]:
         """Tokenize a single text and format for causal language modeling.
         
         Args:
             text (str): String of input text.
+            model_args (ModelArgs): Model hyperparameters.
 
         Returns:
             Optional[Dict[str, torch.Tensor]]: Dictionary containing input_ids, labels, and attention_mask.
@@ -151,6 +147,7 @@ class TextDataset(IterableDataset):
             # Tokenize the text
             tokens = self.tokenizer(
                 text,
+                max_length=model_args.max_seq_len,
                 truncation=True,
                 padding=False,
                 add_special_tokens=True,
@@ -184,9 +181,9 @@ class TextDataset(IterableDataset):
             attention_mask = [1.0] * real_length + [0.0] * (self.target_length - real_length)
             
             return {
-                'input_ids': torch.tensor(input_ids, dtype=torch.long),
-                'attention_mask': torch.tensor(attention_mask, dtype=torch.float),
-                'labels': torch.tensor(labels, dtype=torch.long),
+                'input_ids': torch.tensor(input_ids, dtype=torch.int64),
+                'attention_mask': torch.tensor(attention_mask, dtype=torch.float32),
+                'labels': torch.tensor(labels, dtype=torch.int64),
             }
             
         except Exception as e:
@@ -253,7 +250,7 @@ class TextDataset(IterableDataset):
                     
                     # Tokenize and yield each processed text
                     for processed_text in processed_texts:
-                        tokenized = self.tokenize(processed_text)
+                        tokenized = self.tokenize(processed_text, ModelArgs())
                         if tokenized is not None:
                             processed_count += 1
                             yield tokenized
@@ -273,7 +270,7 @@ class TextDataset(IterableDataset):
                     if tokenized is not None:
                         processed_count += 1
                         yield tokenized
-        
+
         except Exception as e:
             logger.error(f"Error in worker {worker_id}: {e}")
             raise
@@ -611,7 +608,7 @@ def evaluate_model(
 
                 with torch.amp.autocast(device_type=device.type, dtype=dtype):
                     logits, _, aux_loss = model(input_ids, padding_mask=attention_mask, use_cache=False)
-                    loss, lm_loss, aux_loss_val = compute_loss(logits, labels, aux_loss)
+                    loss, lm_loss, aux_loss_val = compute_loss(logits, labels, training_args, aux_loss)
 
                 # Accumulate loss
                 total_loss += loss.item()
@@ -832,7 +829,7 @@ def main(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # Inintialize model and training arguments
+    # Initialize model and training arguments
     model_args = ModelArgs()
     model_args.vocab_size = tokenizer.vocab_size # 32000 for mistral tokenizer
     model_args.pad_token_id = tokenizer.pad_token_id
@@ -854,67 +851,42 @@ def main(
     dedup_filter = DeduplicationFilter()
     logger.info("Initialized text quality and deduplication filters.")
     
-    # Check if we need to download and process data
-    # TODO: remove and fix this
-    if not os.path.exists(GCP_TOKENIZED_PATH.replace('gs://', '').replace(GCP_BUCKET_NAME + '/', '')):
-        logger.info(f"Downloading and processing {dataset_name} dataset...")
-        
-        # Download raw data
-        download_falcon_refinedweb(max_samples=max_samples)
-        
-        # Read and process data
-        logger.info("Reading data from GCS...")
-        texts = []
-        for sample in read_falcon_refinedweb_from_gcs():
-            texts.append(sample['content'])
-            if max_samples is not None and len(texts) >= max_samples:
-                break
-        
-        logger.info(f"Loaded {len(texts)} texts from GCS")
-        
-        # Create dataset with filtering and tokenization
-        dataset = TextDataset(
-            texts=texts,
-            tokenizer=tokenizer,
-            max_length=model_args.max_seq_len,
-            quality_filter=quality_filter,
-            dedup_filter=dedup_filter,
-            skip_filtering=False,
-            save_filtered_texts_path=GCP_FILTERED_PATH,
-            save_tokenized_dataset_path=GCP_TOKENIZED_PATH,
-        )
-        
-        # Clean up texts from memory
-        del texts
-        gc.collect()
-    
-    # Load tokenized dataset
-    logger.info("Loading tokenized dataset...")
-    dataset = load_tokenized_dataset_from_gcs(
-        GCP_TOKENIZED_PATH,
-        model_args.max_position_embeddings,
-        tokenizer
-    )
-
-    # Split dataset into training and validation datasets
-    train_size = int(training_args.train_ratio * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-
-    # Create train loader
+    # Create train loader using streaming dataset
+    logger.info("Creating streaming train dataloader...")
     train_loader = create_dataloader(
-        train_dataset, tokenizer, model_args.max_seq_len, training_args,
-        quality_filter, dedup_filter, max_samples=None
+        dataset_name=dataset_name,
+        tokenizer=tokenizer,
+        max_length=model_args.max_seq_len,
+        training_args=training_args,
+        quality_filter=quality_filter,
+        dedup_filter=dedup_filter,
+        max_samples=max_samples,
+        split="train",
+        streaming=True
     )
 
-    # Create validation loader
+    # Create validation loader using streaming dataset
+    logger.info("Creating streaming validation dataloader...")
     val_loader = create_dataloader(
-        val_dataset, tokenizer, model_args.max_seq_len, training_args,
-        quality_filter, dedup_filter, max_samples=None
+        dataset_name=dataset_name,
+        tokenizer=tokenizer,
+        max_length=model_args.max_seq_len,
+        training_args=training_args,
+        quality_filter=quality_filter,
+        dedup_filter=dedup_filter,
+        max_samples=max_samples // 10 if max_samples else None,
+        split="validation" if "validation" in dataset_name else "train",
+        streaming=True
     )
     
-    # Calculate training steps
-    num_training_steps = len(train_loader) * training_args.epochs // training_args.grad_accum_steps
+    if max_samples is not None:
+        estimated_samples_per_epoch = max_samples
+    else:
+        # Use full Falcon RefinedWeb dataset size
+        estimated_samples_per_epoch = 968_000_015
+
+    estimated_steps_per_epoch = estimated_samples_per_epoch // training_args.batch_size
+    num_training_steps = (estimated_steps_per_epoch * training_args.epochs) // training_args.grad_accum_steps
     
     # Setup training components
     optimizer, scheduler, scaler = setup_training_components(
@@ -941,15 +913,17 @@ def main(
     logger.info("DATASET INFORMATION")
     logger.info("=" * 50)
     logger.info(f"Training dataset: {dataset_name}")
-    logger.info(f"Training examples: {len(train_loader)}")
-    logger.info(f"Validation examples: {len(val_loader)}\n")
+    logger.info(f"Streaming mode: True")
+    logger.info(f"Max samples per epoch: {max_samples if max_samples else 'All available'}")
+    logger.info(f"Estimated steps per epoch: {estimated_steps_per_epoch}\n")
 
     # Tokenization info
     logger.info("TOKENIZATION INFORMATION")
     logger.info("=" * 50)
-    logger.info(f"Pad token: {model_args.pad_token} | EOS token: {model_args.eos_token}")
+    logger.info(f"Pad token: {tokenizer.pad_token} | EOS token: {tokenizer.eos_token}")
     logger.info(f"Pad token id: {model_args.pad_token_id} | EOS token id: {model_args.eos_token_id}")
-    logger.info(f"Vocab size: {model_args.vocab_size}\n")
+    logger.info(f"Vocab size: {model_args.vocab_size}")
+    logger.info(f"Max sequence length: {model_args.max_seq_len}\n")
 
     # Model info
     logger.info("MODEL INFORMATION")
@@ -968,7 +942,7 @@ def main(
     logger.info("TRAINING LENGTHS")
     logger.info("=" * 50)
     logger.info(f"Number of Epochs: {training_args.epochs}")
-    logger.info(f"Number of Steps: {num_training_steps}")
+    logger.info(f"Estimated Number of Steps: {num_training_steps}")
     logger.info(f"Number of warmup steps: {int(training_args.warmup_ratio * num_training_steps)}\n")
 
     # Training loop
@@ -1021,4 +995,11 @@ def main(
     logger.info("Training completed!")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main(
+            dataset_name="tiiuae/falcon-refinedweb",
+            resume_from_checkpoint=None,
+            max_samples=None
+        )
+    except Exception as e:
+        logger.error(f"Failure occured when running main training loop: {e}")
