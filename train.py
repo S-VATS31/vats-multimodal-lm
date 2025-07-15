@@ -17,9 +17,9 @@ from datasets import load_dataset
 
 from tqdm import tqdm
 
-from src.text_generation.model import Transformer
-from src.text_generation.text_quality_filter import TextQualityFilter
-from src.text_generation.deduplication_filter import DeduplicationFilter
+from src.nlp_transformer.model import Transformer
+from src.nlp_transformer.text_quality_filter import TextQualityFilter
+from src.nlp_transformer.deduplication_filter import DeduplicationFilter
 
 class TextDataset(IterableDataset):
     """Iterable text dataset for loading large datasets.
