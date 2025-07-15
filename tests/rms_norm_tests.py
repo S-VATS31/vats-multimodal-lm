@@ -5,7 +5,7 @@ from configs.setup_env import device, dtype
 from configs.training_args import TrainingArgs
 from configs.model_args.model_args_medium import ModelArgs
 
-from src.model import RMSNorm
+from src.text_generation.model import RMSNorm
 
 model_args = ModelArgs()
 train_args = TrainingArgs()

@@ -5,7 +5,7 @@ from configs.setup_env import device, dtype
 from configs.training_args import TrainingArgs
 from configs.model_args.model_args_small import ModelArgs
 
-from src.model import AttentionBlock
+from src.text_generation.model import AttentionBlock
 
 model_args = ModelArgs()
 train_args = TrainingArgs()
