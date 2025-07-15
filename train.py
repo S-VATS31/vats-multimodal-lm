@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple, Optional, Union, Generator, Iterator
 
 import torch
 import torch.nn as nn
-from torch.utils.data import IterableDataset, DataLoader, random_split
+from torch.utils.data import IterableDataset, DataLoader
 from torch.optim import AdamW
 from torch.amp import GradScaler
 from transformers import AutoTokenizer
@@ -17,9 +17,9 @@ from datasets import load_dataset
 
 from tqdm import tqdm
 
-from src.model import Transformer
-from src.text_quality_filter import TextQualityFilter
-from src.deduplication_filter import DeduplicationFilter
+from src.text_generation.model import Transformer
+from src.text_generation.text_quality_filter import TextQualityFilter
+from src.text_generation.deduplication_filter import DeduplicationFilter
 
 class TextDataset(IterableDataset):
     """Iterable text dataset for loading large datasets.
@@ -31,7 +31,7 @@ class TextDataset(IterableDataset):
         quality_filter (Optional[TextQualityFilter]): Text quality filter.
         dedup_filter (Optional[DeduplicationFilter]): Deduplication filter.
         buffer_size (int): Size of internal buffer for batch processing filters.
-        max_samples (Optional[int]): Maximum number of samples to process (None means proecss all).
+        max_samples (Optional[int]): Maximum number of samples to process (None means process all).
         skip_filtering (bool): Whether to skip quality/dedup filtering.
         dataset_config (Optional[str]): Dataset configuration name if needed.
         split (str): Dataset split to use.
@@ -836,7 +836,7 @@ def main(
     model_args.eos_token_id = tokenizer.eos_token_id
 
     training_args = TrainingArgs()
-    logger.info("Initialized model and training arguments.")
+    logger.info("Initialized model arguments and training arguments.")
 
     # Initialize model
     model = Transformer(model_args).to(device)
