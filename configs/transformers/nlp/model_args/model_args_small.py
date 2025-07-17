@@ -10,7 +10,7 @@ This configuration is too small for MoE, set: top_k, num_experts = 1, 1.
 
 from dataclasses import dataclass
 
-from configs.training_args import TrainingArgs
+from configs.transformers.nlp.training_args import TrainingArgs
 training_args = TrainingArgs
 
 @dataclass
