@@ -6,7 +6,6 @@ import torch
 
 from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 from configs.transformers.nlp.training_args import TrainingArgs
-
 from src.transformers.nlp.model import AttentionBlock
 
 model_args = ModelArgs()
