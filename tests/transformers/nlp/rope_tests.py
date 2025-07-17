@@ -1,11 +1,13 @@
+from configs.transformers.nlp.setup_env import device, dtype
+
 import unittest
+
 import torch
 
-from configs.setup_env import device, dtype
-from configs.training_args import TrainingArgs
-from configs.model_args.model_args_medium import ModelArgs
+from configs.transformers.nlp.training_args import TrainingArgs
+from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 
-from src.nlp_transformer.model import RoPE
+from src.transformers.nlp.model import RoPE
 
 model_args = ModelArgs()
 train_args = TrainingArgs()
