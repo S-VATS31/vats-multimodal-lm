@@ -1,4 +1,4 @@
-from configs.setup_env import (
+from configs.transformers.nlp.setup_env import (
     device,
     dtype, 
     use_flash_attn, 
@@ -6,7 +6,7 @@ from configs.setup_env import (
     logger,
     )
 
-from configs.model_args.model_args_medium import ModelArgs
+from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 
 import math
 from typing import Dict, List, Tuple, Optional
