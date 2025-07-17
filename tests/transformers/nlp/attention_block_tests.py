@@ -1,14 +1,16 @@
+from configs.transformers.nlp.setup_env import device, dtype
+
 import unittest
+
 import torch
 
-from configs.setup_env import device, dtype
-from configs.training_args import TrainingArgs
-from configs.model_args.model_args_small import ModelArgs
+from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
+from configs.transformers.nlp.training_args import TrainingArgs
 
-from src.nlp_transformer.model import AttentionBlock
+from src.transformers.nlp.model import AttentionBlock
 
 model_args = ModelArgs()
-train_args = TrainingArgs()
+training_args = TrainingArgs()
 
 class TestAttentionBlock(unittest.TestCase):
     """Test attention block module."""
@@ -22,7 +24,7 @@ class TestAttentionBlock(unittest.TestCase):
             model_args.rms_norm_eps
         ).to(device)
         self.T = 16
-        self.x = torch.randn(train_args.batch_size, self.T, model_args.d_model, dtype=dtype).to(device)
+        self.x = torch.randn(training_args.batch_size, self.T, model_args.d_model, dtype=dtype).to(device)
 
     def test_output_shape(self):
         """Ensure output tensor has same shape as input tensor."""
@@ -58,13 +60,13 @@ class TestAttentionBlock(unittest.TestCase):
 
     def test_forward_with_all_zero_padding_mask(self):
         """Ensure attention block runs with all positions masked out."""
-        padding_mask = torch.zeros(train_args.batch_size, self.T, dtype=torch.bool, device=device)
+        padding_mask = torch.zeros(training_args.batch_size, self.T, dtype=torch.bool, device=device)
         out, _ = self.attention_block(self.x, padding_mask=padding_mask)
         self.assertEqual(out.shape, self.x.shape)
 
     def test_forward_with_all_one_padding_mask(self):
         """Ensure attention block runs with no positions masked."""
-        padding_mask = torch.ones(train_args.batch_size, self.T, dtype=torch.bool, device=device)
+        padding_mask = torch.ones(training_args.batch_size, self.T, dtype=torch.bool, device=device)
         out, _ = self.attention_block(self.x, padding_mask=padding_mask)
         self.assertEqual(out.shape, self.x.shape)
 
