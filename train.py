@@ -1,7 +1,7 @@
-from configs.setup_env import device, dtype, logger
+from configs.transformers.nlp.setup_env import device, dtype, logger
 
-from configs.training_args import TrainingArgs
-from configs.model_args.model_args_medium import ModelArgs
+from configs.transformers.nlp.training_args import TrainingArgs
+from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 
 import os
 import math
@@ -17,9 +17,9 @@ from datasets import load_dataset
 
 from tqdm import tqdm
 
-from src.nlp_transformer.model import Transformer
-from src.nlp_transformer.text_quality_filter import TextQualityFilter
-from src.nlp_transformer.deduplication_filter import DeduplicationFilter
+from src.transformers.nlp.model import Transformer
+from src.transformers.nlp.text_cleaning.text_quality_filter import TextQualityFilter
+from src.transformers.nlp.text_cleaning.deduplication_filter import DeduplicationFilter
 
 class TextDataset(IterableDataset):
     """Iterable text dataset for loading large datasets.
