@@ -7,7 +7,7 @@ def cosine_with_warmup_scheduler(
     optimizer: Optimizer,
     num_warmup_steps: int,
     num_training_steps: int,
-    num_cycles: float = 0.5,
+    num_cycles: float,
     last_epoch: int = -1,
 ) -> LambdaLR:
     """Custom cosine decay learning rate scheduler with linear warmup.
