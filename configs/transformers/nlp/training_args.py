@@ -14,6 +14,7 @@ class TrainingArgs:
     warmup_ratio: float = 0.05
     aux_loss_weight: float = 0.01
     eta_min: float = 6e-7
+    num_cycles: float = 0.5
     num_workers: int = 8
     pin_memory: bool = True
     persistent_workers: bool = True
