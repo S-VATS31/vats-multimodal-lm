@@ -12,6 +12,8 @@ from tqdm import tqdm
 from configs.transformers.nlp.training_args import TrainingArgs
 from utils.transformers.nlp.compute_metrics import compute_loss
 
+# TODO: remove device from function signatures and import it as a global
+
 # Set up logger
 # TODO: set up logger in utils folder and import here (take one from ViT project)
 
