@@ -449,7 +449,7 @@ def train_step(
             logger.error(f"Training step failed: {e}")
             return {'success': False, 'error': str(e)}
 
-def train_epoch(
+def train(
     model: nn.Module,
     dataloader: DataLoader, 
     optimizer, 
@@ -563,7 +563,7 @@ def train_epoch(
             total_lm_loss / successful_steps,
             total_aux_loss / successful_steps)
 
-def evaluate_model(
+def validate(
     model: nn.Module,
     dataloader: DataLoader,
     training_args: TrainingArgs,
@@ -952,12 +952,12 @@ def main(
         logger.info(f"Starting epoch {epoch + 1}/{training_args.epochs}")
 
         # Train for one epoch
-        train_loss, train_lm_loss, train_aux_loss = train_epoch(
+        train_loss, train_lm_loss, train_aux_loss = train(
             model, train_loader, optimizer, scheduler, training_args, device, epoch, scaler
         )
 
         # Evaluate for one epoch
-        val_loss, val_lm_loss, val_aux_loss = evaluate_model(
+        val_loss, val_lm_loss, val_aux_loss = validate(
             model, val_loader, training_args, device, training_args.max_eval_batches
         )
 
