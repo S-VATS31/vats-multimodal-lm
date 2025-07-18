@@ -15,7 +15,7 @@ def cosine_with_warmup_scheduler(
     Args:
         optimizer (Optimizer): PyTorch optimizer to udpate weights.
         num_warmup_steps (int): Number of warmup steps.
-        num_training_steps (int)
+        num_training_steps (int): Total number of training steps.
         num_cycles (int): Number of cosine waves are completed.
         last_epoch (int): Parameter for custom LambdaLR.
 
