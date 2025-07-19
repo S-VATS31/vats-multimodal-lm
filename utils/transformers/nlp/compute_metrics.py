@@ -52,17 +52,3 @@ def compute_perplexity(loss: float) -> float:
         float: Perplexity computed by taking the exponent of the loss.
     """
     return math.exp(loss)
-
-def get_best_metric(current: float, best: float) -> float:
-    """Get best loss/perplexity.
-    
-    Args:
-        current (float): Current value of metric to compare.
-        best (float): Current best value of metric to compare.
-
-    Returns:
-        float: Returns lowest of the two values.
-    """
-    if best < current:
-        return best
-    return current
