@@ -12,7 +12,7 @@ from src.transformers.nlp.text_cleaning.text_quality_filter import TextQualityFi
 
 # TODO: set up logger in utils as utils/setup_logger and return logger func
 
-class TextDataset(IterableDataset):
+class StreamingTextDataset(IterableDataset):
     """Iterable text dataset for loading large datasets.
 
     Args:
