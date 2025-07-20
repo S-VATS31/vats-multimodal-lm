@@ -30,8 +30,8 @@ class ModelArgs:
     eos_token_id: int = 8191
     max_batch_size: int = 2048
     gradient_checkpointing: bool = True
-    num_experts: int = 4
-    top_k: int = 2
+    num_experts: int = 1
+    top_k: int = 1
 
     def __post_init__(self):
         """Post initialization for assertions."""
