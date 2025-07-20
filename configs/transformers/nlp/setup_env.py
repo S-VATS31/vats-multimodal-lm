@@ -1,5 +1,4 @@
 import os
-import logging
 
 # Set up environment
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -18,7 +17,3 @@ try:
 except ImportError:
     use_flash_attn = False
     flash_attn_varlen_qkvpacked_func = None
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("train")
