@@ -1,9 +1,12 @@
-from configs.transformers.nlp.setup_env import dtype
+from configs.transformers.nlp.setup_env import device, dtype
 
+import logging
 from typing import Optional, Dict, Union, Tuple
 
 import torch
 import torch.nn as nn
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LambdaLR
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
@@ -11,18 +14,16 @@ from tqdm import tqdm
 
 from configs.transformers.nlp.training_args import TrainingArgs
 from utils.transformers.nlp.compute_metrics import compute_loss
-
-# TODO: remove device from function signatures and import it as a global
+from utils.setup_logger import setup_logger
 
 # Set up logger
-# TODO: set up logger in utils folder and import here (take one from ViT project)
+train_logger = setup_logger(name="train_logger", log_file="training.log", level=logging.INFO)
 
 def train_step(
     model: nn.Module,
     batch: Dict[str, torch.Tensor],
-    optimizer,
+    optimizer: Optimizer,
     training_args: TrainingArgs,
-    device: torch.device,
     step: int,
     scaler: Optional[GradScaler] = None,
 ) -> Dict[str, Union[float, bool]]:
@@ -31,9 +32,8 @@ def train_step(
     Args:
         model (nn.Module): Transformer architecture.
         batch (Dict[str, torch.Tensor]): Dictionary containing input_ids, labels, and attention mask.
-        optimizer: PyTorch optimizer.
+        optimizer (Optimizer): PyTorch optimizer.
         training_args (TrainingArgs): Training hyperparameters.
-        device (torch.device): Accelerator at use.
         step (int): Current step during training.
         scaler (Optional[GradScaler]): Gradient scaling for bf16/fp16 gradients.
 
@@ -52,8 +52,8 @@ def train_step(
                 logits, _, aux_loss = model(input_ids, padding_mask=attention_mask, use_cache=False)
                 loss, lm_loss, aux_loss_val = compute_loss(logits, labels, training_args, aux_loss)
                 loss = loss / training_args.grad_accum_steps # Scale loss by gradient accumulation steps
+        # Standard FP32 forward pass
         else:
-            # Standard FP32 forward pass
             logits, _, aux_loss = model(input_ids, padding_mask=attention_mask, use_cache=False)
             loss, lm_loss, aux_loss_val = compute_loss(logits, labels, training_args, aux_loss)
             loss = loss / training_args.grad_accum_steps
@@ -74,22 +74,21 @@ def train_step(
     # Catch OOM error
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
-            logger.warning(f"OOM at step {step}, emptying CUDA cache.")
+            train_logger.warning(f"OOM at step {step}, emptying CUDA cache.")
             if device.type == "cuda":
                 torch.cuda.empty_cache()
             optimizer.zero_grad()
             return {'success': False, 'error': 'oom'}
         else:
-            logger.error(f"Training step failed: {e}")
+            train_logger.error(f"Training step failed: {e}")
             return {'success': False, 'error': str(e)}
 
 def train(
     model: nn.Module,
     dataloader: DataLoader, 
-    optimizer, 
-    scheduler, 
-    training_args: TrainingArgs, 
-    device: torch.device, 
+    optimizer: Optimizer, 
+    scheduler: LambdaLR, 
+    training_args: TrainingArgs,
     epoch: int, 
     scaler: Optional[GradScaler] = None,
 ) -> Tuple[float, float, float]:
@@ -98,10 +97,9 @@ def train(
     Args:
         model (nn.Module): Transformer architecture.
         dataloader (DataLoader): PyTorch DataLoader.
-        optimizer: PyTorch optimizer.
-        scheduler: PyTorch scheduler.
+        optimizer (Optimizer): PyTorch optimizer.
+        scheduler (LambdaLR): PyTorch scheduler.
         training_args (TrainingArgs): Training hyperparameters.
-        device (torch.device): Accelerator at use.
         epoch (int): Current epoch during training.
         scaler (Optional[GradScaler]): Gradient scaler to scale bf16/fp16 gradients.
 
@@ -126,7 +124,7 @@ def train(
 
     # Loop through all steps
     for step, batch in enumerate(progress_bar):
-        result = train_step(model, batch, optimizer, training_args, device, step, scaler)
+        result = train_step(model, batch, optimizer, training_args, step, scaler)
 
         # If step was successful, accumulate loss
         if result['success']:
@@ -138,7 +136,7 @@ def train(
             skipped_steps += 1
             # If 10% of steps fail, stop epoch
             if skipped_steps > len(dataloader) * 0.1:
-                logger.error("Too many failed steps, stopping epoch")
+                train_logger.error("Too many failed steps, stopping epoch")
                 break
 
         # Gradient accumulation and optimizer step
@@ -190,7 +188,7 @@ def train(
 
     # No succesful steps, all loss = inf
     if successful_steps == 0:
-        logger.error("No successful training steps in epoch")
+        train_logger.error("No successful training steps in epoch")
         return float('inf'), float('inf'), float('inf')
 
     return (total_loss / successful_steps,
