@@ -338,6 +338,7 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        window_size: Tuple[int, int],
         causal: bool = True,
         padding_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCache] = None,
@@ -348,6 +349,7 @@ class Attention(nn.Module):
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, D].
+            window_size (Tuple[int, int]): Window size for sliding window attention
             causal (bool): To apply causal masking or not.
             padding_mask (torch.Tensor, optional): Padding mask of shape [B, T] where
                 True indicates valid tokens and False indicates padding tokens.
@@ -459,7 +461,8 @@ class Attention(nn.Module):
                     cu_seqlens,
                     max_seqlen,
                     causal=causal,
-                    softmax_scale=1.0 / (self.head_dim ** 0.5)
+                    softmax_scale=1.0 / (self.head_dim ** 0.5),
+                    window_size=window_size,
                 ) # [B * T, num_heads, head_dim]
 
                 # This is done because the FlashAttention 2 function returns only unpadded tokens
@@ -772,6 +775,7 @@ class AttentionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        window_size: Tuple[int, int],
         padding_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCache] = None,
         layer_idx: Optional[int] = None,
@@ -781,9 +785,10 @@ class AttentionBlock(nn.Module):
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
-            padding_mask (torch.Tensor): Padding tensor of shape [B, T].
-            kv_cache (KVCache, optional): Key-value cache for efficient generation.
-            layer_idx (int, optional): Index of the current layer for cache access.
+            window_size (Tuple[int, int]): Window size for SWA.
+            padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
+            kv_cache (Optional[KVCache]): Key-value cache for efficient generation.
+            layer_idx (Optional[int]): Index of the current layer for cache access.
             use_cache (bool): Whether to use KV caching during forward pass.
 
         Returns:
@@ -794,6 +799,7 @@ class AttentionBlock(nn.Module):
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
             attn_out, cache_out = self.attn(
                 self.rms_norm(x),
+                window_size,
                 padding_mask=padding_mask,
                 kv_cache=kv_cache,
                 layer_idx=layer_idx,
@@ -881,6 +887,7 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        window_size: Tuple[int, int],
         padding_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCache] = None,
         layer_idx: Optional[int] = None,
@@ -890,9 +897,10 @@ class TransformerBlock(nn.Module):
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
-            padding_mask (torch.Tensor): Padding tensor of shape [B, T].
-            kv_cache (KVCache, optional): Key-value cache for efficient generation.
-            layer_idx (int, optional): Index of the current layer for cache access.
+            window_size (Tuple[int, int]): Window size for SWA.
+            padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
+            kv_cache (Optional[KVCache]): Key-value cache for efficient generation.
+            layer_idx (Optional[int]): Index of the current layer for cache access.
             use_cache (bool): Whether to use KV caching during forward pass.
 
         Returns:
@@ -904,6 +912,7 @@ class TransformerBlock(nn.Module):
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
             x, cache_out = self.attn_block(
                 x,
+                window_size,
                 padding_mask=padding_mask,
                 kv_cache=kv_cache,
                 layer_idx=layer_idx,
@@ -1024,7 +1033,8 @@ class Transformer(nn.Module):
 
         Args:
             input_ids (torch.Tensor): Input tensor of shape [B, T].
-            padding_mask (torch.Tensor): Padding tensor of shape [B, T].
+            window_size (Tuple[int, int]): Window size for SWA.
+            padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
             use_cache (bool): Whether to use KV caching during forward pass.
 
         Returns:
@@ -1034,7 +1044,7 @@ class Transformer(nn.Module):
                 - Sum of auxiliary losses from all MoE layers.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
-            # Ensure input_ids is a LongTensor (int64)
+            # Ensure input_ids is a LongTensor (int64) for embeddings
             if input_ids.dtype != torch.int64:
                 input_ids = input_ids.long()
 
@@ -1056,6 +1066,7 @@ class Transformer(nn.Module):
                     x, cache_out, aux_loss = checkpoint(
                         layer,
                         x,
+                        self.model_args.window_size,
                         padding_mask,
                         self.kv_cache,
                         i,
@@ -1065,6 +1076,7 @@ class Transformer(nn.Module):
                 else:
                     x, cache_out, aux_loss = layer(
                         x,
+                        window_size=self.model_args.window_size,
                         padding_mask=padding_mask,
                         kv_cache=self.kv_cache,
                         layer_idx=i,
