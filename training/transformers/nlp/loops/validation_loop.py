@@ -1,5 +1,6 @@
 from configs.transformers.nlp.setup_env import device, dtype
 
+import logging
 from typing import Tuple, Optional
 
 import torch
@@ -10,15 +11,15 @@ from tqdm import tqdm
 
 from configs.transformers.nlp.training_args import TrainingArgs
 from utils.transformers.nlp.compute_metrics import compute_loss
+from utils.setup_logger import setup_logger
 
-# TODO: remove device from function signature and add as global
-# TODO: add logger (take one from ViT project)
+# Set up logger
+validation_logger = setup_logger(name="validation_logger", log_file="training.log", level=logging.INFO)
 
 def validate(
     model: nn.Module,
     dataloader: DataLoader,
     training_args: TrainingArgs,
-    device: torch.device, 
     max_batches: Optional[int] = None,
 ) -> Tuple[float, float, float]:
     """Evaluate model with AMP support.
@@ -70,17 +71,17 @@ def validate(
             # Catch OOM error
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
-                    logger.warning("OOM during evaluation, skipping batch")
+                    validation_logger.warning("OOM during evaluation, skipping batch")
                     if device.type == "cuda":
                         torch.cuda.empty_cache()
                     continue
                 else:
-                    logger.warning(f"Evaluation error: {e}")
+                    validation_logger.warning(f"Evaluation error: {e}")
                     continue
 
     # No succesful batches, all loss = inf
     if successful_batches == 0:
-        logger.error("No successful evaluation batches")
+        validation_logger.error("No successful evaluation batches")
         return float('inf'), float('inf'), float('inf')
 
     return (total_loss / successful_batches,
