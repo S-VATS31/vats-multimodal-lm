@@ -403,14 +403,14 @@ class Attention(nn.Module):
                 # Update cache using only the T most recent tokens
                 kv_cache.update(layer_idx, k[:, -T:], v[:, -T:])
 
-            # Expand KV for GQA
-            if self.query_groups != self.num_heads:
-                heads_per_group = self.num_heads // self.query_groups
-                k = k.repeat_interleave(heads_per_group, dim=2) # [B, T, num_heads, head_dim]
-                v = v.repeat_interleave(heads_per_group, dim=2) # [B, T, num_heads, head_dim]
-
             # FlashAttention 2 - requires CUDA/flash attn 2 available
             if use_flash_attn and device.type == "cuda":
+                # Expand kv_heads to num_heads for GQA
+                # We will do this in the PyTorch SDPA route using enable_gqa=True
+                if self.query_groups != self.num_heads:
+                    heads_per_group = self.num_heads // self.query_groups
+                    k = k.repeat_interleave(heads_per_group, dim=2) # [B, T, num_heads, head_dim]
+                    v = v.repeat_interleave(heads_per_group, dim=2) # [B, T, num_heads, head_dim]
                 qkv_packed = torch.stack([q, k, v], dim=3) # [B, T, num_heads, 3, head_dim]
                 qkv_packed = qkv_packed.contiguous()
 
@@ -511,7 +511,8 @@ class Attention(nn.Module):
                 out = F.scaled_dot_product_attention(
                     q, k, v,
                     attn_mask=attn_mask,
-                    is_causal=causal if padding_mask is None else False
+                    is_causal=causal if padding_mask is None else False,
+                    enable_gqa=True # Expand kv_heads -> num_heads
                 ) # [B, num_heads, T, head_dim]
 
                 # [B, num_heads, T, head_dim] -> [B, T, num_heads, head_dim]
