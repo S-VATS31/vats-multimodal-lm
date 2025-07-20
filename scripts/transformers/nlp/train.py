@@ -24,6 +24,7 @@ from save_load_checkpoints.transformers.nlp.save_checkpoint import save_checkpoi
 from save_load_checkpoints.transformers.nlp.load_checkpoint import load_checkpoint
 
 from utils.transformers.nlp.compute_metrics import compute_perplexity
+from utils.transformers.nlp.visualization import plot_metrics
 
 # TODO: change training logic to use total tokens as seen rather than epochs as tracking
 
@@ -256,8 +257,14 @@ def main(
     return train_lm_losses, train_perplexities, val_lm_losses, val_perplexities
 
 if __name__ == "__main__":
-    main(
+    train_lm_losses, train_perplexities, val_lm_losses, val_perplexities = main(
         dataset_name="tiiuae/falcon-refinedweb",
         resume_from_checkpoint=None,
         max_samples=None
+    )
+    plot_metrics(
+        train_lm_losses,
+        val_lm_losses,
+        train_perplexities,
+        val_perplexities
     )
