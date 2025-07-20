@@ -3,10 +3,7 @@ from configs.transformers.nlp.setup_env import (
     dtype, 
     use_flash_attn, 
     flash_attn_varlen_qkvpacked_func,
-    logger,
     )
-
-from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 
 import math
 from typing import Dict, List, Tuple, Optional
@@ -15,6 +12,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+
+from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 
 class RoPE(nn.Module):
     """Rotary positional embeddings (RoPE) to be applied to the query and key vectors.
@@ -1194,7 +1193,6 @@ class Transformer(nn.Module):
                 else:
                     # Temperature 0 means greedy sampling
                     do_sample = False
-                    logger.info("Temperature of 0 received, applying greedy decoding.")
 
                 # Apply top-k filtering
                 if top_k > 0 and top_k < self.model_args.vocab_size:
@@ -1208,7 +1206,6 @@ class Transformer(nn.Module):
                     )
                 elif top_k == 1:
                     do_sample = False
-                    logger.info("Top-k value of 1 received, applying greedy decoding.")
 
                 # Apply top-p (nucleus) filtering
                 if 0 < top_p < 1.0:
