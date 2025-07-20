@@ -1,20 +1,23 @@
 from configs.transformers.nlp.setup_env import device
 
+import logging
 from typing import Optional, Dict, Union
 
-import torch # TODO: remove this when device (global var) is imported
+import torch
 import torch.nn as nn
 from torch.amp import GradScaler
 
-# TODO: set up and import logger
+from utils.setup_logger import setup_logger
+
+# Set up logger
+checkpoint_logger = setup_logger(name="checkpoint_logger", log_file="checkpoints.log", level=logging.INFO)
 
 def load_checkpoint(
     filename: str,
     model: nn.Module,
     optimizer,
     scheduler,
-    scaler: Optional[GradScaler] = None,
-    device: torch.device = None,
+    scaler: Optional[GradScaler] = None
 ) -> Dict[str, Union[int, float]]:
     """Load checkpoint from saved .pt file.
     
@@ -45,7 +48,7 @@ def load_checkpoint(
         if scaler is not None and 'scaler_state_dict' in checkpoint:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
         
-        logger.info(f"Succesfully loaded checkpoint from {filename}")
+        checkpoint_logger.info(f"Succesfully loaded checkpoint from {filename}")
         
         return {
             'epoch': checkpoint['epoch'],
@@ -54,5 +57,5 @@ def load_checkpoint(
         }
         
     except Exception as e:
-        logger.error(f"Failed to load checkpoint from {filename}: {e}")
+        checkpoint_logger.error(f"Failed to load checkpoint from {filename}: {e}")
         raise
