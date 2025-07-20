@@ -11,6 +11,7 @@ class TrainingArgs:
     clip_grad_norm: float = 1.0
     weight_decay: float = 5e-4
     betas: Tuple[float, float] = (0.9, 0.95)
+    fused: bool = True
     warmup_ratio: float = 0.05
     aux_loss_weight: float = 0.01
     eta_min: float = 6e-7
