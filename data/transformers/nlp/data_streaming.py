@@ -229,7 +229,7 @@ class StreamingTextDataset(IterableDataset):
                 sample_count += 1
                 
                 # Extract text content
-                text = example["text"].strip()
+                text = example["content"].strip()
                 
                 # Skip empty texts
                 if not text:
