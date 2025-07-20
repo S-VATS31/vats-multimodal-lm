@@ -5,6 +5,7 @@ This configuration contains:
     - 13 billion parameters without MoE.
 """
 
+from typing import Tuple
 from dataclasses import dataclass
 
 from configs.transformers.nlp.training_args import TrainingArgs
@@ -21,6 +22,7 @@ class ModelArgs:
     dropout: float = 0.2
     rope_base: float = 10000.0
     rms_norm_eps: float = 1e-7
+    window_size: Tuple[int, int] = (1024, 1024)
     vocab_size: int = 65536
     max_seq_len: int = 32768
     tie_weights: bool = False

@@ -7,6 +7,7 @@ This configuration contains:
 This configuration is too small for MoE, set: top_k, num_experts = 1, 1.
 """
 
+from typing import Tuple
 from dataclasses import dataclass
 
 from configs.transformers.nlp.training_args import TrainingArgs
@@ -23,6 +24,7 @@ class ModelArgs:
     dropout: float = 0.2
     rope_base: float = 10000.0
     rms_norm_eps: float = 1e-7
+    window_size: Tuple[int, int] = (384, 384)
     vocab_size: int = 65536
     max_seq_len: int = 2048
     tie_weights: bool = False
