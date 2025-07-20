@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import Tuple, Optional, List, Dict, Iterator, Generator
 
 import torch
@@ -9,8 +10,10 @@ from datasets import load_dataset
 from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 from src.transformers.nlp.text_cleaning.deduplication_filter import DeduplicationFilter
 from src.transformers.nlp.text_cleaning.text_quality_filter import TextQualityFilter
+from utils.setup_logger import setup_logger
 
-# TODO: set up logger in utils as utils/setup_logger and return logger func
+# Set up logger
+data_logger = setup_logger(name="data_logger", log_file="data_loading.log", level=logging.INFO)
 
 class StreamingTextDataset(IterableDataset):
     """Iterable text dataset for loading large datasets.
@@ -57,8 +60,8 @@ class StreamingTextDataset(IterableDataset):
         # Prepare target length for padding
         self.target_length = max_length - 1 # Account for shifting for causal LM
         
-        logger.info(f"Initialized TextDataset with streaming={streaming}")
-        logger.info(f"Dataset: {dataset_name}, Max length: {max_length}")
+        data_logger.info(f"Initialized TextDataset with streaming={streaming}")
+        data_logger.info(f"Dataset: {dataset_name}, Max length: {max_length}")
     
     def load_dataset(self):
         """Load the raw dataset from HuggingFace."""
@@ -82,7 +85,7 @@ class StreamingTextDataset(IterableDataset):
                 )
             return dataset
         except Exception as e:
-            logger.error(f"Failed to load dataset {self.dataset_name}: {e}")
+            data_logger.error(f"Failed to load dataset {self.dataset_name}: {e}")
             raise
 
     def process_batch(self, texts: List[str]) -> List[str]:
@@ -178,7 +181,7 @@ class StreamingTextDataset(IterableDataset):
             }
             
         except Exception as e:
-            logger.warning(f"Failed to tokenize text: {e}")
+            data_logger.warning(f"Failed to tokenize text: {e}")
             return None
 
     def worker_info(self) -> Tuple[int, int]:
@@ -211,7 +214,7 @@ class StreamingTextDataset(IterableDataset):
         sample_count = 0
         processed_count = 0
         
-        logger.info(f"Worker {worker_id}/{num_workers} starting to stream examples")
+        data_logger.info(f"Worker {worker_id}/{num_workers} starting to stream examples")
         
         try:
             for i, example in enumerate(dataset):
@@ -251,7 +254,7 @@ class StreamingTextDataset(IterableDataset):
                     
                     # Log progress periodically
                     if processed_count % 1000 == 0:
-                        logger.info(f"Worker {worker_id}: processed {processed_count} examples")
+                        data_logger.info(f"Worker {worker_id}: processed {processed_count} examples")
             
             # Process remaining texts in buffer
             if text_buffer:
@@ -263,10 +266,10 @@ class StreamingTextDataset(IterableDataset):
                         yield tokenized
         
         except Exception as e:
-            logger.error(f"Error in worker {worker_id}: {e}")
+            data_logger.error(f"Error in worker {worker_id}: {e}")
             raise
         
-        logger.info(f"Worker {worker_id} finished: {processed_count} examples yielded from {sample_count} samples")
+        data_logger.info(f"Worker {worker_id} finished: {processed_count} examples yielded from {sample_count} samples")
     
     def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
         """Iterator function for IterableDataset.
