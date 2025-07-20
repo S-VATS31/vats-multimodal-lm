@@ -1,4 +1,4 @@
-from configs.transformers.vision.vit_2d.training_args import device, dtype
+from configs.transformers.vision.vit_2d.setup_env import device, dtype
 
 from typing import Tuple, Optional
 
