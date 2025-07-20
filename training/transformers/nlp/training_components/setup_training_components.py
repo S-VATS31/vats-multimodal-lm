@@ -36,6 +36,7 @@ def setup_training_components(
         betas=training_args.betas,
         eps=training_args.epsilon,
         weight_decay=training_args.weight_decay,
+        fused=training_args.fused
     )
 
     # Setup scheduler
