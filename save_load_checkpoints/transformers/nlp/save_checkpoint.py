@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 from pathlib import Path
 
@@ -9,8 +10,10 @@ from torch.amp import GradScaler
 
 from configs.transformers.nlp.training_args import TrainingArgs
 from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
+from utils.setup_logger import setup_logger
 
-# TODO: set up logger and import
+# Set up logger
+checkpoint_logger = setup_logger(name="checkpoint_logger", log_file="checkpoints.log", level=logging.INFO)
 
 def save_checkpoint(
     model: nn.Module,
@@ -67,10 +70,10 @@ def save_checkpoint(
         # Load checkpoint data to filename
         save_path = checkpoints_dir / filename
         torch.save(checkpoint_data, save_path)
-        logger.info(f"Succesfully saved checkpoint to {filename}")
+        checkpoint_logger.info(f"Succesfully saved checkpoint to {filename}")
         
         return str(save_path)
 
     except Exception as e:
-        logger.error(f"Failed to save checkpoint as {filename}: {e}")
+        checkpoint_logger.error(f"Failed to save checkpoint as {filename}: {e}")
         raise # We don't want to load faulty checkpoints, so no return
