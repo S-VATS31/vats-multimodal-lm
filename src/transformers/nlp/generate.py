@@ -29,7 +29,7 @@ class AutoregressiveTokenGenerator:
             device=device
         )
 
-    def generate(
+    def _generate(
         self,
         input_ids: torch.Tensor,
         max_new_tokens: int,
@@ -230,7 +230,7 @@ class AutoregressiveTokenGenerator:
         # Turn off gradient computation for token generation
         with torch.no_grad():
             with autocast(device_type=device.type, dtype=dtype):
-                generated_ids = self.generate(
+                generated_ids = self._generate(
                     input_ids=input_ids,
                     max_new_tokens=generation_args.max_new_tokens,
                     temperature=generation_args.temperature,
