@@ -353,8 +353,8 @@ class Attention(nn.Module):
             causal (bool): To apply causal masking or not.
             padding_mask (torch.Tensor, optional): Padding mask of shape [B, T] where
                 True indicates valid tokens and False indicates padding tokens.
-            kv_cache (KVCache, optional): Key-value cache for efficient generation.
-            layer_idx (int, optional): Index of the current layer for cache access.
+            kv_cache (Optional[KVCache]): Key-value cache for efficient generation.
+            layer_idx (Optional[int]): Index of the current layer for cache access.
             use_cache (bool): Whether to use KV caching during forward pass.
 
         Returns:
@@ -419,9 +419,7 @@ class Attention(nn.Module):
                 # Handle padding mask for FlashAttention
                 if padding_mask is not None:
                     if padding_mask.shape != (B, T):
-                        raise ValueError(
-                            f"Expected padding mask shape [B, T], got {padding_mask.shape}"
-                            )
+                        raise ValueError(f"Expected padding mask shape [B, T], got {padding_mask.shape}")
                     # Ensure padding mask is a boolean tensor
                     padding_mask = padding_mask.bool()
                     seq_lens = padding_mask.sum(dim=1).int() # [B]
@@ -450,7 +448,7 @@ class Attention(nn.Module):
                     ).to(device) # [B + 1]
                     max_seqlen = k.size(1)
 
-                    # Total tokens if calculated as B * T
+                    # Total tokens is calculated as B * T
                     total_tokens = B * max_seqlen
 
                     qkv_packed = qkv_packed.view(total_tokens, self.num_heads, 3, self.head_dim)
@@ -492,9 +490,7 @@ class Attention(nn.Module):
                 # Apply padding mask for PyTorch SDPA
                 if padding_mask is not None:
                     if padding_mask.shape != (B, T):
-                        raise ValueError(
-                            f"Expected padding mask shape [B, T], got {padding_mask.shape}"
-                            )
+                        raise ValueError(f"Expected padding mask shape [B, T], got {padding_mask.shape}")
                     padding_mask = padding_mask.bool() # Ensure padding mask is a boolean tensor
                     attn_mask = padding_mask.unsqueeze(1).unsqueeze(2) # [B, 1, 1, T]
                     attn_mask = attn_mask.expand(B, 1, T, k.size(2)) # [B, 1, T_q, T_k]
@@ -952,10 +948,7 @@ class Transformer(nn.Module):
 
         self.rms_norm = RMSNorm(model_args.d_model, model_args.rms_norm_eps).to(device)
 
-        # Language modeling head, bias=False for weight tying
-        self.lm_head = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False).to(device)
-
-        # Initialize KV cache
+        # Initialize KV Cache
         self.kv_cache = KVCache(
             max_batch_size=model_args.max_batch_size,
             max_seq_len=model_args.max_seq_len,
@@ -965,6 +958,9 @@ class Transformer(nn.Module):
             dtype=dtype,
             device=device
         )
+
+        # Language modeling head, bias=False for weight tying
+        self.lm_head = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False).to(device)
 
         self.apply(self._init_weights)
 
@@ -1097,172 +1093,3 @@ class Transformer(nn.Module):
             logits = self.lm_head(x)
 
             return logits, cache_outs, total_aux_loss
-
-    def generate(
-        self,
-        input_ids: torch.Tensor,
-        max_new_tokens: int,
-        temperature: float = 1.0,
-        top_k: int = 50,
-        top_p: float = 0.9,
-        do_sample: bool = True,
-        pad_token_id: Optional[int] = None,
-        eos_token_id: Optional[int] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        use_cache: bool = True,
-    ) -> torch.Tensor:
-        """Generate tokens autoregressively using decoding methods.
-
-        Args:
-            input_ids (torch.Tensor): int64 tensor containing tokens.
-            max_new_tokens (int): Maximum number of tokens the model can generate at a time.
-            temperature (float): Decoding method to encourage more randomness/determinism based on value.
-            top_k (int): Top-k logits to be sampled.
-            top_p (float): Top-p hyperparameter used as a threshold for masking out certain logits.
-            do_sample (bool): Whether to apply sampling or greedy decoding.
-            pad_token_id (Optional[int]): Special value of the padding token to be masked out.
-            eos_token_id (Optional[int]): End of sequence token appended to the end of each token.
-            attention_mask (Optional[torch.Tensor]): Padding mask of shape [B, T].
-            use_cache (bool): Boolean to whether use the KV cache or not.
-
-        Returns:
-            torch.Tensor: Returns a tensor of generated tokens of shape [B, T].
-        """
-        if pad_token_id is None:
-            pad_token_id = self.model_args.pad_token_id
-        if eos_token_id is None:
-            eos_token_id = self.model_args.eos_token_id
-
-        B, T = input_ids.shape
-        device = input_ids.device
-
-        # Create attention mask if not provided
-        if attention_mask is None:
-            attention_mask = (input_ids != pad_token_id)
-
-        generated_ids = input_ids.clone()
-        unfinished_sequences = torch.ones(B, dtype=torch.bool).to(device) # All sequences start unfinished
-
-        self.eval()
-        with torch.no_grad():
-            # Reset and initialize cache
-            if use_cache:
-                self.kv_cache.reset()
-                self.kv_cache.initialize(B)
-
-            # Process initial sequence
-            logits, _, _ = self.forward(
-                input_ids=generated_ids, padding_mask=attention_mask, use_cache=use_cache
-                )
-
-            if use_cache:
-                self.kv_cache.increment_seq_len(T)
-
-            # Generation loop
-            for step in range(max_new_tokens):
-                current_seq_len = generated_ids.shape[1]
-
-                # Check sequence length limit
-                if current_seq_len >= self.model_args.max_seq_len:
-                    break
-
-                # Skip if all sequences are finished
-                if not unfinished_sequences.any():
-                    break
-
-                # Get logits for next token prediction
-                if use_cache and step > 0:
-                    # For cached generation, only process the last token
-                    last_token = generated_ids[:, -1:].contiguous()
-                    last_attention = torch.ones(B, 1, dtype=torch.bool).to(device)
-                    # Only process unfinished sequences
-                    last_attention = last_attention & unfinished_sequences.unsqueeze(1)
-
-                    logits, _, _ = self.forward(
-                        input_ids=last_token, padding_mask=last_attention, use_cache=True
-                        )
-                    self.kv_cache.increment_seq_len(1)
-                else:
-                    # For non-cached or first step, process full sequence
-                    if attention_mask.shape[1] < current_seq_len:
-                        # Extend attention mask for new tokens
-                        new_attention = torch.cat([
-                            attention_mask,
-                            unfinished_sequences.unsqueeze(1).expand(-1, current_seq_len - attention_mask.shape[1])
-                        ], dim=1)
-                    else:
-                        new_attention = attention_mask[:, :current_seq_len]
-
-                    logits, _, _ = self.forward(
-                        input_ids=generated_ids, padding_mask=new_attention, use_cache=False
-                        )
-
-                # Get logits for the last position
-                next_token_logits = logits[:, -1, :].clone()
-
-                # Apply temperature
-                if temperature > 0:
-                    next_token_logits = next_token_logits / temperature
-                else:
-                    # Temperature 0 means greedy sampling
-                    do_sample = False
-
-                # Apply top-k filtering
-                if top_k > 0 and top_k < self.model_args.vocab_size:
-                    # Get the top-k values and set others to -inf
-                    topk_values, _ = torch.topk(next_token_logits, top_k, dim=-1)
-                    min_topk = topk_values[:, -1:].expand_as(next_token_logits)
-                    next_token_logits = torch.where(
-                        next_token_logits < min_topk,
-                        torch.full_like(next_token_logits, float('-inf')),
-                        next_token_logits
-                    )
-                elif top_k == 1:
-                    do_sample = False
-
-                # Apply top-p (nucleus) filtering
-                if 0 < top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True, dim=-1)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
-                    # Remove tokens with cumulative probability above the threshold
-                    sorted_indices_to_remove = cumulative_probs > top_p
-                    # Keep at least one token
-                    sorted_indices_to_remove[:, 0] = False
-                    # Shift right to keep the first token above threshold
-                    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-
-                    # Convert back to original indices
-                    indices_to_remove = torch.zeros_like(next_token_logits, dtype=torch.bool)
-                    indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
-                    next_token_logits[indices_to_remove] = float('-inf')
-
-                # Apply sampling
-                if do_sample and temperature > 0:
-                    probs = F.softmax(next_token_logits, dim=-1)
-                    next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
-                # Greedy decoding
-                else:
-                    next_tokens = torch.argmax(next_token_logits, dim=-1)
-
-                # Only update unfinished sequences
-                next_tokens = torch.where(unfinished_sequences, next_tokens, pad_token_id)
-
-                # Append new tokens
-                generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(1)], dim=1)
-
-                # Update attention mask
-                attention_mask = torch.cat([
-                    attention_mask,
-                    unfinished_sequences.unsqueeze(1)
-                ], dim=1)
-
-                # Check for EOS tokens
-                if eos_token_id is not None:
-                    unfinished_sequences = unfinished_sequences & (next_tokens != eos_token_id)
-
-        # Reset KV cache
-        if use_cache:
-            self.kv_cache.reset()
-
-        return generated_ids
