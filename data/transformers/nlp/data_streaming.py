@@ -111,7 +111,7 @@ class StreamingTextDataset(IterableDataset):
                 self.quality_filter,
                 batched=True,
                 batch_size=512,
-                num_proc=(os.cpu_count() or 8), # or is for case where os.cpu_count()=None
+                num_proc=os.cpu_count() or 8, # or is for case where os.cpu_count()=None
                 desc="Quality filtering",
             ).filter(lambda x: x["text"] is not None)
         
@@ -121,7 +121,7 @@ class StreamingTextDataset(IterableDataset):
                 self.dedup_filter,
                 batched=True,
                 batch_size=512,
-                num_proc=1, # Single threading for deduplicatoin
+                num_proc=1, # Single threading for deduplication
                 desc="Deduplication",
             ).filter(lambda x: x["text"] is not None)
         
@@ -278,3 +278,4 @@ class StreamingTextDataset(IterableDataset):
             Iterator[Dict[str, torch.Tensor]]: Returning tokenized examples in the form of input_ids.
         """
         return self.stream_examples()
+    
