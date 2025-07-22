@@ -27,3 +27,4 @@ class TrainingArgs:
     save_steps: int = 500
     save_freq: int = 1
     max_eval_batches: int = 250
+    max_skipped_steps: int = 1000
