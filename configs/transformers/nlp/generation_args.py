@@ -15,3 +15,4 @@ class GenerationArgs:
     max_seq_len: int = 32768
     repetition_penalty: float = 1.5
     return_only_new_tokens: bool = True
+    generation_frequency: int = 10_000_000_000
