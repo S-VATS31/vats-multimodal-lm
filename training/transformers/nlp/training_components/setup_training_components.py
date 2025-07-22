@@ -24,9 +24,9 @@ def setup_training_components(
         num_training_steps (int): Number of training steps.
 
     Returns:
-        Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler, Optional[GradScaler]]:
-            - torch.optim.Optimizer: AdamW optimizer.
-            - torch.optim.lr.scheduler._LRScheduler: Custom consine decay lr scheduler.
+        Tuple[Optimizer, LambdaLR, Optional[GradScaler]]:
+            - Optimizer: AdamW optimizer.
+            - LambdaLR: Custom cosine decay lr scheduler.
             - Optional[GradScaler]: Gradient scaling for bf16/fp16 gradients.
     """
     # Setup optimizer
