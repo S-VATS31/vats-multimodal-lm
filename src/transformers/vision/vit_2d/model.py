@@ -302,7 +302,6 @@ class GroupedQueryAttention(nn.Module):
             ValueError: If `D` is not equal to `d_model`.
             ValueError: If `q.shape[-1]` is not equal to `k.shape[-1]`.
             ValueError: If `softmax_attn.shape[-1]` is not equal to `v.shape[-2]`.
-            ValueError: If `T` (sequence length) is equal to 0.
         """
         with autocast(device_type=device.type, dtype=dtype):
             if x.dim() != 3:
@@ -322,7 +321,6 @@ class GroupedQueryAttention(nn.Module):
             # Apply RoPE to q and k using the new method that handles the correct tensor shapes
             q = self.rope_module.apply_rope_to_tensor(q) # [B, num_heads, T, head_dim]
             k = self.rope_module.apply_rope_to_tensor(k) # [B, query_groups, T, head_dim]
-
 
             # TODO: add flash attention + swa route 
 
