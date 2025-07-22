@@ -25,6 +25,7 @@ class TrainingArgs:
     logging_steps: int = 100
     eval_steps: int = 500
     save_steps: int = 500
-    save_freq: int = 1
+    save_freq: int = 10_000_000_000
     max_eval_batches: int = 250
     max_skipped_steps: int = 1000
+    max_train_tokens: int = 500_000_000_000
