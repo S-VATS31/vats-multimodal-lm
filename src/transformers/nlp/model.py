@@ -1042,7 +1042,7 @@ class Transformer(nn.Module):
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
             # Ensure input_ids is a LongTensor (int64) for embeddings
             if input_ids.dtype != torch.int64:
-                input_ids = input_ids.long()
+                input_ids = input_ids.to(torch.int64)
 
             # Apply embeddings
             x = self.token_embed(input_ids) # [B, T, d_model]
