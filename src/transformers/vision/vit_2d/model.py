@@ -17,57 +17,54 @@ from torch.utils.checkpoint import checkpoint
 from configs.transformers.vision.vit_2d.model_args.model_args_large import ModelArgs
 
 class PatchEmbeddings(nn.Module):
-    """Patch embeddings layer for creating square patches of the original image.
+    """Efficient Patch Embeddings using Conv2d for Vision Transformers.
 
     Args:
-        img_size (int): Represents the height and width of the image.
-        patch_size (int): Height and width of each patch.
+        img_size (int): Height and width of the image (assumed square).
+        patch_size (int): Height and width of each patch (assumed square).
         C_in (int): Number of input channels.
-        d_model (int): Dimensionality of the model's input/output representations.
+        d_model (int): Dimension of output embeddings.
     """
     def __init__(self, img_size: int, patch_size: int, C_in: int, d_model: int):
         super().__init__()
 
+        if img_size % patch_size != 0:
+            raise ValueError("img_size must be divisible by patch_size")
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches = (img_size // patch_size) ** 2
-        self.patch_dim = C_in * patch_size ** 2
-        if img_size % patch_size != 0:
-            raise ValueError("img_size must be divisible by patch_size")
 
-        # Linear projection for 1D patches
-        self.proj = nn.Linear(self.patch_dim, d_model).to(device)
+        # Patch projection
+        self.proj = nn.Conv2d(C_in, d_model, kernel_size=patch_size, stride=patch_size)
 
-        # CLS token - learnable parameter
-        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model).to(device)) # [1, 1, d_model]
+        # CLS token
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Perform forward pass of the Patch Embeddings layer with CLS token.
+        """Forward pass with patch projection and CLS token.
 
         Args:
-            x (torch.Tensor): Input tensor of shape [B, C, H, W].
+            x (torch.Tensor): [B, C, H, W] input image tensor.
 
         Returns:
-            torch.Tensor: Output tensor of [B, num_patches + 1, d_model] (includes CLS token).
+            torch.Tensor: [B, num_patches + 1, d_model]
         """
         with autocast(device_type=device.type, dtype=dtype):
-            x = x.to(device)
-            B, _, H_in, W_in = x.shape
-            if H_in != self.img_size or W_in != self.img_size:
-                raise ValueError(f"H_in ({H_in}), W_in ({W_in}) must match img_size ({self.img_size})")
+            # Get batch size, height, and width
+            B, _, H, W = x.shape
+            if H != self.img_size or W != self.img_size:
+                raise ValueError(f"Expected input of size {self.img_size}x{self.img_size}, got {H}x{W}")
+            
+            # Project patches
+            x = self.proj(x) # [B, d_model, H/P, W/P]
+            x = x.flatten(2) # [B, d_model, num_patches]
+            x = x.transpose(1, 2) # [B, num_patches, d_model]
 
-            # Divide image into patches
-            x = x.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size) # [B, C_in, H_in//P, P, W_in//P, P]
-
-            # Reshape patches
-            x = x.permute(0, 2, 4, 1, 3, 5).contiguous() # [B, H_in//P, W_in//P, C_in, P, P]
-            x = x.view(B, -1, self.patch_dim) # [B, num_patches, patch_dim]
-            x = self.proj(x) # Linear projection
-
-            # Expand CLS token
+            # Add CLS token
             cls_tokens = self.cls_token.expand(B, -1, -1) # [B, 1, d_model]
-            x = torch.cat([cls_tokens, x], dim=1) # [B, num_patches + 1, d_model]
-            return x
+            x = torch.cat((cls_tokens, x), dim=1) # [B, num_patches + 1, d_model]
+
+        return x
 
 class RMSNorm(nn.Module):
     """RMSNorm layer applied during GQA/FFN block.
