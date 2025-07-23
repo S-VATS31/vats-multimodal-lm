@@ -335,6 +335,24 @@ class Attention(nn.Module):
 
         self.rope = RoPE(self.head_dim, theta)
 
+    def extend_kv_heads(
+        self,
+        input_tensor: torch.Tensor, 
+        heads_per_group: int, 
+        dim_to_repeat: int
+    ):
+        """Extend kv heads to query heads (num_heads).
+        
+        Args:
+            input_tensor (torch.Tensor): Key or value tensor to be repeated.
+            heads_per_group (int): Heads per group computed as num_heads // query_groups.
+            dim_to_repeat (int): Dimension to of the input tensor to be repeated.
+
+        Returns:
+            torch.Tensor: Key or value tensor with specific dimension extended.
+        """
+        return torch.repeat_interleave(input_tensor, heads_per_group, dim=dim_to_repeat)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -405,14 +423,15 @@ class Attention(nn.Module):
                 # Update cache using only the T most recent tokens
                 kv_cache.update(layer_idx, k[:, -T:], v[:, -T:])
 
+            # Compute heads per group for kv heads -> query heads
+            heads_per_group = self.num_heads // self.query_groups
+
+            # Extend KV tensors
+            k = self.extend_kv_heads(input_tensor=k, heads_per_group=heads_per_group, dim_to_repeat=2)
+            v = self.extend_kv_heads(input_tensor=v, heads_per_group=heads_per_group, dim_to_repeat=2)
+
             # FlashAttention 2 - requires CUDA/flash attn 2 available
             if use_flash_attn and device.type == "cuda":
-                # Expand kv_heads to num_heads for GQA
-                # We will do this in the PyTorch SDPA route using enable_gqa=True
-                if self.query_groups != self.num_heads:
-                    heads_per_group = self.num_heads // self.query_groups
-                    k = k.repeat_interleave(heads_per_group, dim=2) # [B, T, num_heads, head_dim]
-                    v = v.repeat_interleave(heads_per_group, dim=2) # [B, T, num_heads, head_dim]
                 qkv_packed = torch.stack([q, k, v], dim=3) # [B, T, num_heads, 3, head_dim]
                 qkv_packed = qkv_packed.contiguous()
 
@@ -511,7 +530,6 @@ class Attention(nn.Module):
                     q, k, v,
                     attn_mask=attn_mask,
                     is_causal=causal if padding_mask is None else False,
-                    enable_gqa=True # Expand kv_heads -> num_heads
                 ) # [B, num_heads, T, head_dim]
 
                 # [B, num_heads, T, head_dim] -> [B, T, num_heads, head_dim]
@@ -523,7 +541,7 @@ class Attention(nn.Module):
             # Final projection
             return self.w_o(out), cache_out
 
-class SwiGLUExpert(nn.Module):
+class SwiGLUExpert(nn.Module):  
     """SwiGLU expert layer.
 
     Args:
