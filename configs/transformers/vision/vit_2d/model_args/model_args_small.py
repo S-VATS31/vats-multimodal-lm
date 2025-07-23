@@ -19,3 +19,15 @@ class ModelArgs:
     num_classes = 1000 # change for different datasets
     use_checkpointing: bool = True
     
+    def __post_init__(self):
+        """Post initialization for assertions."""
+        if self.d_model % self.num_heads != 0:
+            raise ValueError(f"Expected d_model to be divible by num_heads, got {self.d_model} % {self.num_heads} != 0.")
+        if self.num_heads % self.query_groups != 0:
+            raise ValueError(f"Expected num_heads to be divible by query_groups, got {self.num_heads} % {self.query_groups} != 0.")
+        if self.d_model * 4 != self.d_ffn:
+            raise ValueError(f"Expected d_ffn = d_model * 4, got {self.d_model} * 4 != {self.d_ffn}")
+        if len(self.window_size) != 2:
+            raise ValueError(f"Expected len(window_size) to be equal to 2, got {len(self.window_size)}")
+        if self.window_size[0] != self.window_size[1]:
+            raise ValueError(f"Expected left and right windows to be equal, got {self.window_size[0]} != {self.window_size[1]}")
