@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Tuple
 
 @dataclass
 class ModelArgs:
@@ -11,6 +12,7 @@ class ModelArgs:
     query_groups: int = 16
     d_ffn: int = 8092
     num_layers: int = 24
+    window_wize: Tuple[int, int] = (768, 768)
     dropout: float = 0.2
     rope_base: float = 30000.0
     rms_norm_eps: float = 1e-7
