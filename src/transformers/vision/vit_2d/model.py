@@ -297,10 +297,28 @@ class GroupedQueryAttention(nn.Module):
         self.o_proj = nn.Linear(d_model, d_model)
         self.rope_module = rope_module
 
+    def expand(
+        self, 
+        input_tensor: torch.Tensor, 
+        heads_per_group: int, 
+        dim_to_repeat: int
+    ) -> torch.Tensor:
+        """Expand kv heads to query heads for GQA
+        
+        Args:
+            input_tensor (torch.Tensor): Input key or value tensor to get expanded.
+            heads_per_group (int): Heads per group computed as num_heads // query_groups.
+            dim (int): Dimension of tensor to be repeated over.
+
+        Returns:
+            torch.Tensor: Output tensor with kv heads expanded.
+        """
+        return input_tensor.repeat_interleave(heads_per_group, dim_to_repeat)
+
     def forward(
         self, x: torch.Tensor, 
         window_size: Tuple[int, int], 
-        attn_method: str = "torch-sdpa"
+        attn_method: str = "manual"
     ) -> torch.Tensor:
         """Perform forward pass of Attention layer.
 
@@ -340,23 +358,17 @@ class GroupedQueryAttention(nn.Module):
             q = self.rope_module.apply_rope_to_tensor(q) # [B, num_heads, T, head_dim]
             k = self.rope_module.apply_rope_to_tensor(k) # [B, query_groups, T, head_dim]
 
+            # Compute heads_per_group for GQA
+            heads_per_group = self.num_heads // self.query_groups
+
             # Flash Attention 2 + GQA + SWA
             if attn_method == "flash-attn" and use_flash_attn and device.type == "cuda":
-                # Manually expand k and v to match the number of query heads
-                heads_per_group = self.num_heads // self.query_groups
-                k_expanded = (
-                    k.unsqueeze(2).expand(
-                        B, self.query_groups, heads_per_group, T, self.head_dim).reshape(
-                            B, self.num_heads, T, self.head_dim
-                            )
-                    ) # [B, num_heads, T, head_dim]
-                v_expanded = (
-                    v.unsqueeze(2).expand(
-                        B, self.query_groups, heads_per_group, T, self.head_dim).reshape(
-                            B, self.num_heads, T, self.head_dim
-                            )
-                    ) # [B, num_heads, T, head_dim]
-                qkv_packed = torch.stack([q, k, v], dim=3).contiguous() # [B, T, num_heads, 3, head_dim]
+                # Expand k and v to match the number of query heads
+                k_expanded = self.expand(k, heads_per_group, dim_to_repeat=1)
+                v_expanded = self.expand(v, heads_per_group, dim_to_repeat=1)
+
+                # Stack tensors along the 3rd dimension
+                qkv_packed = torch.stack([q, k_expanded, v_expanded], dim=3).contiguous() # [B, T, num_heads, 3, head_dim]
                 # Cumulative sequence lengths for all T
                 cu_seqlens = torch.arange(0, (B + 1) * T, step=T, dtype=torch.int32).to(device)
                 max_seqlen = k.size(2)
@@ -378,20 +390,9 @@ class GroupedQueryAttention(nn.Module):
 
             # Manual integration of GQA
             elif attn_method == "manual":
-                # Manually expand k and v to match the number of query heads
-                heads_per_group = self.num_heads // self.query_groups
-                k_expanded = (
-                    k.unsqueeze(2).expand(
-                        B, self.query_groups, heads_per_group, T, self.head_dim).reshape(
-                            B, self.num_heads, T, self.head_dim
-                            )
-                    ) # [B, num_heads, T, head_dim]
-                v_expanded = (
-                    v.unsqueeze(2).expand(
-                        B, self.query_groups, heads_per_group, T, self.head_dim).reshape(
-                            B, self.num_heads, T, self.head_dim
-                            )
-                    ) # [B, num_heads, T, head_dim]
+                # Expand kv heads to num heads for GQA
+                k_expanded = self.expand(k, heads_per_group, dim_to_repeat=1)
+                v_expanded = self.expand(v, heads_per_group, dim_to_repeat=1)
                 if q.shape[-1] != k_expanded.shape[-1]:
                     raise ValueError(
                         f"q.shape[-1] ({q.shape[-1]}) must be equal to k_expanded.shape[-1] ({k_expanded.shape[-1]}) for matrix multiplication."
@@ -420,9 +421,8 @@ class GroupedQueryAttention(nn.Module):
                 raise ValueError(f"Expected 'flash-attn', 'torch-sdpa', or 'manual', got {attn_method}")
 
             # Concatenate heads
-            attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, D)
-            o = self.o_proj(attn_out) # [B, T, d_model]
-            return o
+            attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, D) # [B, T, d_model]
+            return self.o_proj(attn_out)
 
 class GQABlock(nn.Module):
     """GQA layer with dropout, RMSNorm and residuals applied.
