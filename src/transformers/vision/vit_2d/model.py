@@ -642,15 +642,3 @@ class VisionTransformer(nn.Module):
             # Classification head
             logits = self.classifier(cls_token) # [B, num_classes]
             return logits
-
-def main():
-    model_args = ModelArgs()
-    model = VisionTransformer(model_args).to(device)
-    B, C, H, W = 16, 3, 384, 384
-    x = torch.randn(B, C, H, W).to(device)
-    logits = model(x)
-    return logits
-
-if __name__ == "__main__":
-    logits = main()
-    print(logits.shape) # Should be [16, 1000]
