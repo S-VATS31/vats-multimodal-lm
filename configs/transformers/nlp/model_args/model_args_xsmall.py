@@ -24,7 +24,7 @@ class ModelArgs:
     dropout: float = 0.1
     rope_base: float = 10000.0
     rms_norm_eps: float = 1e-7
-    window_size: Tuple[int, int] = (128, 128)
+    window_size: Tuple[int, int] = (128, 0)
     vocab_size: int = 50257
     max_seq_len: int = 512
     tie_weights: bool = True
