@@ -22,12 +22,10 @@ class ModelArgs:
     dropout: float = 0.2
     rope_base: float = 10000.0
     rms_norm_eps: float = 1e-7
-    window_size: Tuple[int, int] = (512, 512)
+    window_size: Tuple[int, int] = (512, 0)
     vocab_size: int = 65536
     max_seq_len: int = 32768
     tie_weights: bool = True
-    pad_token_id: int = 0
-    eos_token_id: int = 65535
     max_batch_size: int = 2048
     gradient_checkpointing: bool = True
     num_experts: int = 32
