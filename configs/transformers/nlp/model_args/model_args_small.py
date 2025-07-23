@@ -19,7 +19,7 @@ class ModelArgs:
     d_model: int = 512
     num_heads: int = 8
     query_groups: int = 4
-    d_ffn: int = 2048  # 4 * d_model
+    d_ffn: int = 2048 
     num_layers: int = 12
     dropout: float = 0.2
     rope_base: float = 10000.0
@@ -28,8 +28,6 @@ class ModelArgs:
     vocab_size: int = 65536
     max_seq_len: int = 2048
     tie_weights: bool = False
-    pad_token_id: int = 0
-    eos_token_id: int = 65535
     max_batch_size: int = 2048
     gradient_checkpointing: bool = True
     num_experts: int = 1

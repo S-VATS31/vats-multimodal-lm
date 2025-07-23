@@ -28,8 +28,6 @@ class ModelArgs:
     vocab_size: int = 50257
     max_seq_len: int = 512
     tie_weights: bool = True
-    pad_token_id: int = 0
-    eos_token_id: int = 8191
     max_batch_size: int = 2048
     gradient_checkpointing: bool = True
     num_experts: int = 1
