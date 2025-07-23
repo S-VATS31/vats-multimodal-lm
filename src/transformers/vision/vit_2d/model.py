@@ -313,7 +313,7 @@ class GroupedQueryAttention(nn.Module):
         Returns:
             torch.Tensor: Output tensor with kv heads expanded.
         """
-        return input_tensor.repeat_interleave(heads_per_group, dim_to_repeat)
+        return torch.repeat_interleave(input_tensor, heads_per_group, dim=dim_to_repeat)
 
     def forward(
         self, x: torch.Tensor, 
