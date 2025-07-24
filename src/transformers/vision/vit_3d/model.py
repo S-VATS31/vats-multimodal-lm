@@ -19,7 +19,77 @@ from utils.setup_logger import setup_logger
 # Set up logger
 logger = setup_logger(name="train_logger", log_file="training.log", level=logging.INFO)
 
-# TODO: implement patch embeddings using Conv3D layer
+import torch
+import torch.nn as nn
+from torch.cuda.amp import autocast
+
+class PatchEmbeddings3D(nn.Module):
+    """Patch embeddings to split the video into 3D patches for spatiotemporal transformers.
+    
+    Args:
+        C_in (int): Number of input channels.
+        patch_size (Tuple[int, int, int]): Patch size in (T, H, W).
+        d_model (int): Dimensionality of the model's embeddings.
+        dropout (float): Dropout probability applied after normalization.
+        eps (float): Epsilon for RMSNorm stability.
+    """
+    def __init__(
+        self,
+        C_in: int,
+        patch_size: Tuple[int, int, int],
+        d_model: int,
+        dropout: float,
+        eps: float,
+    ):
+        super().__init__()
+
+        self.patch_size = patch_size
+        self.d_model = d_model
+
+        # Projection using Conv3D.
+        self.projection = nn.Conv3d(
+            in_channels=C_in,
+            out_channels=d_model,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=False
+        )
+
+        # Set up RMS Norm/Dropout
+        self.rms_norm = RMSNorm(d_model, eps)
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, C_in, T, H, W].
+                Where:
+                    T is time in frames.
+                    H is height.
+                    W is width.
+
+        Returns:
+            torch.Tensor: Patch embeddings of shape [B, N, d_model].
+        """
+        with autocast(device_type=x.device.type, dtype=x.dtype):
+            _, _, T, H, W = x.shape
+            pt, ph, pw = self.patch_size
+            
+            # Calculate padding needed to make T, H, W divisible by patch size
+            pad_t = (pt - T % pt) % pt
+            pad_h = (ph - H % ph) % ph
+            pad_w = (pw - W % pw) % pw
+
+            # Pad in reverse order: (W_left, W_right, H_left, H_right, T_left, T_right)
+            x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_t), mode='constant', value=0)
+            
+            # Project patch embeddings and flatten
+            x = self.projection(x) # [B, d_model, T, H, W]
+            x = x.flatten(2).transpose(1, 2) # [B, N, d_model]
+
+            # Apply normalization
+            return self.rms_norm(self.dropout(x))
+
 
 # TODO: implement 3D RoPE
 
@@ -424,8 +494,14 @@ class VideoTransformer(nn.Module):
 
         self.model_args = model_args
 
-        # TODO
-        # self.patch_embeddings = PatchEmbeddings3D()
+        # Set up patch embeddings
+        self.patch_embeddings = PatchEmbeddings3D(
+            C_in=model_args.C_in,
+            patch_size=model_args.patch_size,
+            d_model=model_args.d_model,
+            dropout=model_args.dropout,
+            eps=model_args.rms_norm_eps,
+        )
 
         # Stack transformer encoder layers
         self.layers = nn.ModuleList([
@@ -436,7 +512,7 @@ class VideoTransformer(nn.Module):
                 rope_theta=model_args.rope_theta,
                 d_ffn=model_args.d_ffn,
                 dropout=model_args.dropout,
-                eps=model_args.rms_norm_eps
+                eps=model_args.rms_norm_eps,
             )
         ])
 
