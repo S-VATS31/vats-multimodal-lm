@@ -19,10 +19,6 @@ from utils.setup_logger import setup_logger
 # Set up logger
 logger = setup_logger(name="train_logger", log_file="training.log", level=logging.INFO)
 
-import torch
-import torch.nn as nn
-from torch.cuda.amp import autocast
-
 class PatchEmbeddings3D(nn.Module):
     """Patch embeddings to split the video into 3D patches for spatiotemporal transformers.
     
