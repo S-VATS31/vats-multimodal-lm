@@ -59,13 +59,7 @@ class AutoregressiveTokenGenerator:
         Returns:
             torch.Tensor: Returns a tensor of generated tokens of shape [B, T].
         """
-        if pad_token_id is None:
-            pad_token_id = self.model_args.pad_token_id
-        if eos_token_id is None:
-            eos_token_id = self.model_args.eos_token_id
-
         B, T = input_ids.shape
-        device = input_ids.device
 
         # Create attention mask if not provided
         if attention_mask is None:
