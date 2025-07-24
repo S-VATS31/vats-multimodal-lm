@@ -3,7 +3,7 @@ from configs.transformers.vision.vit_2d.setup_env import (
     dtype,
     use_flash_attn,
     flash_attn_varlen_qkvpacked_func
-    )
+)
 
 import math
 from typing import Tuple, Optional
