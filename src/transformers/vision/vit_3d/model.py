@@ -138,9 +138,13 @@ class Attention(nn.Module):
         super().__init__()
 
         if d_model % num_heads != 0:
-            raise ValueError(f"Expected d_model to be divisble by num_heads, got {d_model} % {num_heads} != 0")
+            raise ValueError(
+                f"Expected d_model to be divisble by num_heads, got {d_model} % {num_heads} != 0"
+                )
         if num_heads % query_groups != 0:
-            raise ValueError(f"Expected num_heads to be divisble by query_groups, got {num_heads} % {query_groups} != 0")
+            raise ValueError(
+                f"Expected num_heads to be divisble by query_groups, got {num_heads} % {query_groups} != 0"
+                )
         
         self.d_model = d_model
         self.num_heads = num_heads
@@ -425,7 +429,7 @@ class GatedFFNBlock(nn.Module):
         dropout (float): Dropout probability.
         eps (float): Small epsilon value to prevent numerical instability.
     """
-    def __init__(self, d_model: int, d_ffn: int, dropout: float, eps):
+    def __init__(self, d_model: int, d_ffn: int, dropout: float, eps: float):
         super().__init__()
 
         self.gated_ffn = GatedFFN(d_model, d_ffn, dropout)
