@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import autocast
+from torch.utils.checkpoint import checkpoint
 
 from configs.transformers.vision.vit_3d.model_args.model_args_large import ModelArgs
 from utils.setup_logger import setup_logger
@@ -509,8 +510,130 @@ class VideoTransformer(nn.Module):
                 d_ffn=model_args.d_ffn,
                 dropout=model_args.dropout,
                 eps=model_args.rms_norm_eps,
-            )
+            ) for _ in range(model_args.num_layers)
         ])
 
-        # Set up RMSNorm
+        # Set up RMSNorm and Dropout
         self.rms_norm = RMSNorm(model_args.d_model, model_args.rms_norm_eps)
+        self.dropout = nn.Dropout(p=model_args.dropout)
+
+        # Set up pool for adaptive average pooling
+        self.pool = nn.AdaptiveAvgPool1d(1) # Pool over number of patches, N
+
+        # Set up classifier
+        self.classifier = nn.Linear(model_args.d_model, model_args.num_classes)
+
+        # Initialize weights
+        self.apply(self._init_weights)
+        self._apply_depth_scaled_init()
+
+    def _init_weights(self, module) -> None:
+        """Weight initialization for VideoTransformer modules.
+        
+        Args:
+            module: PyTorch module to initialize.
+        """
+        if isinstance(module, nn.Linear):
+            # For linear layers, use Xavier/Glorot uniform with proper scaling
+            if hasattr(module, 'weight') and module.weight is not None:
+                # Special handling for different linear layer types
+                if any(name in str(module) for name in ['w_qkv', 'w_o']):
+                    std = (2.0 / (module.weight.size(-1) + module.weight.size(-2))) ** 0.5
+                    nn.init.normal_(module.weight, mean=0.0, std=std)
+                elif 'classifier' in str(module):
+                    # Final classifier layer - use smaller initialization for stability
+                    nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                elif any(name in str(module) for name in ['w1', 'w3']):
+                    # FFN input projections - Xavier uniform
+                    nn.init.xavier_uniform_(module.weight, gain=1.0)
+                elif 'w2' in str(module):
+                    # FFN output projection - smaller initialization for residual stability
+                    std = 0.02 / (2 * self.model_args.num_layers) ** 0.5
+                    nn.init.normal_(module.weight, mean=0.0, std=std)
+                else:
+                    # Default for other linear layers
+                    nn.init.xavier_uniform_(module.weight, gain=1.0)
+            
+            # Initialize biases to zero if they exist
+            if hasattr(module, 'bias') and module.bias is not None:
+                nn.init.zeros_(module.bias)
+        
+        elif isinstance(module, nn.Conv3d):
+            # 3D convolution for patch embedding - use Kaiming initialization
+            if hasattr(module, 'weight') and module.weight is not None:
+                nn.init.kaiming_normal_(
+                    module.weight, 
+                    mode='fan_out', 
+                    nonlinearity='linear'
+                )
+            
+            if hasattr(module, 'bias') and module.bias is not None:
+                nn.init.zeros_(module.bias)
+        
+        elif isinstance(module, RMSNorm):
+            # RMSNorm weight initialization
+            if hasattr(module, 'weight') and module.weight is not None:
+                nn.init.ones_(module.weight)
+        
+        elif isinstance(module, nn.Embedding):
+            # If you add positional embeddings or other embeddings later
+            if hasattr(module, 'weight') and module.weight is not None:
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        
+        elif isinstance(module, nn.Parameter):
+            # Handle any standalone parameters
+            if module.dim() == 1:
+                # 1D parameters (like normalization weights)
+                nn.init.ones_(module)
+            else:
+                # Multi-dimensional parameters
+                nn.init.xavier_uniform_(module)
+
+    def _apply_depth_scaled_init(self) -> None:
+        """Apply depth-scaled initialization as a post-processing step."""
+        for layer in self.layers:
+            # Scale residual connections by layer depth
+            scale_factor = (2 * self.model_args.num_layers) ** -0.5
+            
+            # Scale attention output projection
+            if hasattr(layer.attention_block.attention, 'w_o'):
+                layer.attention_block.attention.w_o.weight.data.mul_(scale_factor)
+            
+            # Scale FFN output projection  
+            if hasattr(layer.gated_ffn_block.gated_ffn, 'w2'):
+                layer.gated_ffn_block.gated_ffn.w2.weight.data.mul_(scale_factor)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Perform forward pass of the entire video transformer.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, T, C, H, W].
+
+        Returns:
+            torch.Tensor: Returns logits of shape [B, num_classses].
+        """
+        # Apply patch embeddings and dropout
+        x = self.dropout(self.patch_embeddings(x))
+
+        # Pass through transformer encoder layers
+        for layer in self.layers:
+            if self.model_args.use_checkpointing:
+                x = checkpoint(
+                    layer,
+                    x,
+                    self.model_args.window_size,
+                )
+            else:
+                x = layer(x, self.model_args.window_size)
+
+        # Apply final RMSNorm
+        x = self.rms_norm(x)
+
+        # Apply adaptive average pooling
+        x = x.transpose(1, 2) # [B, d_model, N]
+        x = self.pool(x) # [B, d_model, 1]
+        x = x.squeeze(-1) # [B, d_model]
+
+        # Get logits through classifier
+        logits = self.classifier(x)
+        return logits # [B, num_classes]
