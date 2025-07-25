@@ -118,6 +118,7 @@ class RMSNorm(nn.Module):
                 x / (torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True)) + self.eps)
             )
         
+
 class Attention(nn.Module):
     """Attention layer with Flash Attention 2, SWA, and GQA support.
     
@@ -334,12 +335,14 @@ class Attention(nn.Module):
             # q = self.rope(q)
             # k = self.rope(k)
 
+            # Apply optimized attention if available
             if window_size is not None:
                 attn_out = self._optimized_attention(q, k, v, B, N, window_size)
             else:
                 attn_out = self._grouped_query_attention(q, k, v, B, N)
 
-            return self.w_o(attn_out) # Project output, [B, N, d_model]
+            return self.w_o(attn_out) # [B, N, d_model]
+
 
 class GatedFFN(nn.Module):
     """Gated FFN layer with SwiGLU activation.
@@ -372,6 +375,7 @@ class GatedFFN(nn.Module):
         with autocast(device_type=device.type, dtype=dtype):
             return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
         
+
 class AttentionBlock(nn.Module):
     """Attention block with attention, normalization, dropout, and residuals applied.
     
@@ -411,6 +415,7 @@ class AttentionBlock(nn.Module):
         with autocast(device_type=device.type, dtype=dtype):
             return x + self.dropout(self.attention(self.rms_norm(x), window_size))
     
+
 class GatedFFNBlock(nn.Module):
     """Gated FFN block with a pass through the FFN, dropout, normalization, and residuals applied.
     
@@ -480,6 +485,7 @@ class TransformerBlock(nn.Module):
         with autocast(device_type=device.type, dtype=dtype):
             return self.gated_ffn_block(self.attention_block(x, window_size))
         
+
 class VideoTransformer(nn.Module):
     """Complete video transformer module.
     
@@ -576,7 +582,7 @@ class VideoTransformer(nn.Module):
                 nn.init.ones_(module.weight)
         
         elif isinstance(module, nn.Embedding):
-            # If you add positional embeddings or other embeddings later
+            # Embedding layers
             if hasattr(module, 'weight') and module.weight is not None:
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
         
@@ -618,11 +624,7 @@ class VideoTransformer(nn.Module):
         # Pass through transformer encoder layers
         for layer in self.layers:
             if self.model_args.use_checkpointing:
-                x = checkpoint(
-                    layer,
-                    x,
-                    self.model_args.window_size,
-                )
+                x = checkpoint(layer, x, self.model_args.window_size, use_reentrant=False)
             else:
                 x = layer(x, self.model_args.window_size)
 
