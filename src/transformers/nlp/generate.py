@@ -10,6 +10,8 @@ from src.transformers.nlp.model import Transformer, KVCache
 from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 from configs.transformers.nlp.generation_args import GenerationArgs
 
+# TODO: add repetition penalty
+
 class AutoregressiveTokenGenerator:
     def __init__(self, model_args: ModelArgs):
         self.model_args = model_args
@@ -237,12 +239,10 @@ class AutoregressiveTokenGenerator:
                     use_cache=generation_args.use_cache
                 )
 
-        # Get first generated sequence
+        # [0] is to get the first generated sequence
         if generation_args.return_only_new_tokens:
-            # Fully skips the input prompt, and only returns generated tokens
             generated_text = tokenizer.decode(generated_ids[0][input_ids.shape[1]:], skip_special_tokens=True)
         else:
-            # Returns prompt and generated text
             generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
         return generated_text
     
