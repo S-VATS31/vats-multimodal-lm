@@ -1,3 +1,5 @@
+# TODO: change configs/transformers/(nlp or vision/(vit_2d or vit_3d))/setup_env.py to configs/setup_env.py
+
 import os
 
 # Set up environment
