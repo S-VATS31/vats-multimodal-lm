@@ -13,7 +13,26 @@ training_args = TrainingArgs()
 
 @dataclass
 class ModelArgs:
-    """Extra large configuration of model arguments."""
+    """Extra large configuration of model arguments.
+    
+    Args:
+        d_model (int): Dimensionality of the model's embeddings.
+        num_heads (int): Number of attention heads.
+        query_groups (int): Number of query groups for GQA.
+        d_ffn (int): Dimensionality of the FFN. Typically, d_ffn = 4 * d_model.
+        num_layers (int): Number of layers being stacked.
+        dropout (float): Dropout probability.
+        rope_base (float): Theta hyperparameter for RoPE.
+        rms_norm_eps (float): Epsilon value to prevent numerical instability in RMSNorm.
+        window_size (Tuple[int, int]): Window size for sliding window attention.
+        vocab_size (int): Unique tokens that the model can recognize.
+        max_seq_len (int): Largest length (in tokens) that can be inputted.
+        tie_weights (bool): Whether to tie weights or not.
+        max_batch_size (int): Max batch size hyperparameter for KV cache.
+        gradient_checkpointing (bool): Whether to use gradient checkpointing or not.
+        num_experts (int): Number of experts for MoE.
+        top_k (int): Top-k routing for MoE.
+    """
     d_model: int = 5120
     num_heads: int = 40
     query_groups: int = 10
