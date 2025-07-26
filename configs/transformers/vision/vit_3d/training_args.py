@@ -1,6 +1,8 @@
 from typing import Tuple
 from dataclasses import dataclass
 
+# TODO: Update training args to specialize in 3D video transformers.
+
 @dataclass
 class TrainingArgs:
     """Dataclass containing model training arguments.
@@ -22,10 +24,9 @@ class TrainingArgs:
         pin_memory (bool): Whether to pin memory or not.
         persistent_workers (bool): Whether to keep workers alive through epochs.
         drop_last (bool): Whether the final batch (smaller than the actual batch size) is used or dropped.
+        train_ratio (float): Percentage of training examples.
         grad_accum_steps (int): Gradient accumulation steps to get a larger effective batch size.
-        save_freq (int): Number of tokens accumulated until regular checkpoint is saved.
-        max_skipped_steps (int): Max steps to be skipped before epoch is ended.
-        max_train_tokens (int): Max amount of tokens to train on.
+        # TODO: add the rest of the docstrings.
     """
     learning_rate: float = 2e-4
     epochs: int = 3
@@ -43,13 +44,11 @@ class TrainingArgs:
     pin_memory: bool = True
     persistent_workers: bool = True
     drop_last: bool = True
+    train_ratio: float = 0.95  # TODO: deprecate this or actually use it 
     grad_accum_steps: int = 4
-    
-    logging_steps: int = 100     # TODO: check if being used or deprecate
-    eval_steps: int = 500        # TODO: check if being used or deprecate
-    save_steps: int = 500        # TODO: check if being used or deprecate
-    max_eval_batches: int = 250  # TODO: check if being used or deprecate
 
-    save_freq: int = 10_000_000_000
-    max_skipped_steps: int = 1000
-    max_train_tokens: int = 500_000_000_000
+    # TODO: actually use this for logging or remove
+    logging_steps: int = 100
+    eval_steps: int = 500
+    save_steps: int = 500
+    max_eval_batches: int = 250
