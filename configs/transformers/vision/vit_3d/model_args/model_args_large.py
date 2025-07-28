@@ -1,20 +1,17 @@
 from dataclasses import dataclass
 from typing import Tuple
 
-# TODO: Update hyperparameter values once model is complete.
-# TODO: Calculate parameters once model is complete.
-
 @dataclass
 class ModelArgs:
-    """Large configuration of model arguments, containing X million parameters."""
+    """Large configuration of model arguments, containing 1.3 billion parameters."""
     patch_size: Tuple[int, int, int] = (2, 16, 16)
     grid_size: Tuple[int, int, int] = (2, 2, 2)
     C_in: int = 3
-    d_model: int = 1152
-    num_heads: int = 16
+    d_model: int = 2112
+    num_heads: int = 32
     query_groups: int = 8
-    d_ffn: int = 4608
-    num_layers: int = 16
+    d_ffn: int = 8448
+    num_layers: int = 20
     window_size: Tuple[int, int] = (384, 384)
     dropout: float = 0.2
     rope_theta: float = 30000.0

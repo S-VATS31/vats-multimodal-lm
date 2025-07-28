@@ -6,7 +6,7 @@ from typing import Tuple
 
 @dataclass
 class ModelArgs:
-    """Small configuration of model arguments, containing X million parameters."""
+    """Small configuration of model arguments, containing 321 million parameters."""
     patch_size: Tuple[int, int, int] = (2, 16, 16)
     grid_size: Tuple[int, int, int] = (2, 2, 2)
     C_in: int = 3
