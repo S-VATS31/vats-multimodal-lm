@@ -6,8 +6,9 @@ from typing import Tuple
 
 @dataclass
 class ModelArgs:
-    """Medium configuration of model arguments, containing X million parameters."""
+    """Extra small configuration of model arguments, containing X million parameters."""
     patch_size: Tuple[int, int, int] = (2, 16, 16)
+    grid_size: Tuple[int, int, int] = (2, 2, 2)
     C_in: int = 3
     d_model: int = 1152
     num_heads: int = 16
@@ -33,3 +34,7 @@ class ModelArgs:
             raise ValueError(f"Expected len(window_size) to be equal to 2, got {len(self.window_size)}")
         if self.window_size[0] != self.window_size[1]:
             raise ValueError(f"Expected left and right windows to be equal, got {self.window_size[0]} != {self.window_size[1]}")
+        if len(self.patch_size) != 3:
+            raise ValueError(f"Expected len(patch_size) == 3 for T, H, W dimensions, got {len(self.patch_size)} != 3.")
+        if len(self.grid_size) != 3:
+            raise ValueError(f"Expected len(grid_size) == 3 for T, H, W dimensions, got {len(self.grid_size)} != 3.")
