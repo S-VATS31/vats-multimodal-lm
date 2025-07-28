@@ -128,9 +128,7 @@ class RoPE3D(nn.Module):
         # inv_freq = 1 / (theta ^ (2i/d)) where d = dim_per_axis
         for _ in range(3): # T, H, W
             num_pairs = self.dim_per_axis // 2
-            freqs = 1.0 / (self.theta ** (
-                torch.arange(0, num_pairs) * 2.0 / self.dim_per_axis
-            ))
+            freqs = 1.0 / (self.theta ** (torch.arange(0, num_pairs) * 2.0 / self.dim_per_axis))
             freqs_per_dim.append(freqs)
         
         # Store inverse frequencies non-learnable buffers
@@ -155,13 +153,13 @@ class RoPE3D(nn.Module):
         Returns:
             torch.Tensor: Lookup grid of shape [N, 3], where N = grid_t * grid_h * grid_w.
         """
-        t_coords = torch.arange(grid_t)
-        h_coords = torch.arange(grid_h)
-        w_coords = torch.arange(grid_w)
+        t_coords = torch.arange(grid_t).to(device)
+        h_coords = torch.arange(grid_h).to(device)
+        w_coords = torch.arange(grid_w).to(device)
         
         # Create lookup table and flatten
         t_grid, h_grid, w_grid = torch.meshgrid(t_coords, h_coords, w_coords, indexing='ij')
-        # [N, 3] for number of patches (grid_t * grid_h * grid_w) and 3 for T, H, W dimensions
+        # [N, 3] for number of patches (N = grid_t * grid_h * grid_w) and 3 for T, H, W dimensions
         return torch.stack([t_grid.flatten(), h_grid.flatten(), w_grid.flatten()], dim=-1) 
         
     def _apply_rotary_embedding_1d(
@@ -335,6 +333,7 @@ class Attention(nn.Module):
         num_heads: int,
         query_groups: int,
         rope_theta: float,
+        patch_size: Tuple[int, int, int],
     ):
         super().__init__()
 
@@ -369,8 +368,8 @@ class Attention(nn.Module):
             dtype=dtype
         )
 
-        # TODO:
-        # self.rope = RoPE3D(num_heads, rope_theta)
+        # Initialize RoPE
+        self.rope = RoPE3D(self.head_dim, rope_theta, patch_size)
 
     def _extend_kv_heads(
         self,
@@ -502,11 +501,17 @@ class Attention(nn.Module):
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, N, self.d_model)
         return attn_out
 
-    def forward(self, x: torch.Tensor, window_size: Optional[Tuple[int, int]] = None) -> torch.Tensor:
+    def forward(
+        self, 
+        x: torch.Tensor,
+        grid_size: Tuple[int, int, int],
+        window_size: Optional[Tuple[int, int]] = None
+    ) -> torch.Tensor:
         """Perform forward pass of the attention layer.
         
         Args:
             x (torch.Tensor): Input tensor of shape [B, N, d_model].
+            grid_size (Tuple[int, int, int]): Grid size parameter for RoPE.
             window_size (Tuple[int, int]): Window size for SWA.
 
         Returns:
@@ -536,9 +541,9 @@ class Attention(nn.Module):
             k = k.view(B, N, self.query_groups, self.head_dim) # [B, N, query_groups, head_dim]
             v = v.view(B, N, self.query_groups, self.head_dim) # [B, N, query_groups, head_dim]
 
-            # TODO: Apply RoPE3D
-            # q = self.rope(q)
-            # k = self.rope(k)
+            # Apply RoPE3D to qk tensors
+            q = self.rope(q, grid_size)
+            k = self.rope(k, grid_size)
 
             # Apply optimized attention if available
             if window_size is not None:
@@ -590,7 +595,8 @@ class AttentionBlock(nn.Module):
         query_groups (int): Number of query groups for GQA.
         rope_theta (float): Theta hyperparameter for RoPE.
         eps (float): Small value to prevent numerical instability.
-        dropout (float): Dropout probability
+        dropout (float): Dropout probability.
+        patch_size (Tuple[int, int, int]): T, H, W sizes for each 3D patch.
     """
     def __init__(
         self,
@@ -600,25 +606,32 @@ class AttentionBlock(nn.Module):
         rope_theta: float,
         eps: float,
         dropout: float,
+        patch_size: Tuple[int, int, int],
     ):
         super().__init__()
 
-        self.attention = Attention(d_model, num_heads, query_groups, rope_theta)
+        self.attention = Attention(d_model, num_heads, query_groups, rope_theta, patch_size)
         self.rms_norm = RMSNorm(d_model, eps)
         self.dropout = nn.Dropout(p=dropout)
 
-    def forward(self, x: torch.Tensor, window_size: Optional[Tuple[int, int]] = None) -> torch.Tensor:
+    def forward(
+        self, 
+        x: torch.Tensor,
+        grid_size: Tuple[int, int, int],
+        window_size: Optional[Tuple[int, int]] = None
+    ) -> torch.Tensor:
         """Perform forward pass of the Attention layer.
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, N, d_model].
+            grid_size (Tuple[int, int, int]): Grid size parameter for RoPE.
             window_size (Optional[Tuple[int, int]]): Window size for SWA.
 
         Returns:
             torch.Tensor: Output tensor of shape [B, N d_model].
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return x + self.dropout(self.attention(self.rms_norm(x), window_size))
+            return x + self.dropout(self.attention(self.rms_norm(x), grid_size, window_size))
     
 
 class GatedFFNBlock(nn.Module):
@@ -661,6 +674,7 @@ class TransformerBlock(nn.Module):
         d_ffn (int): Dimensionality of the FFN.
         dropout (float): Dropout probability.
         eps (float): Small epsilon value to prevent numerical instability.
+        patch_size (Tuple[int, int, int]): T, H, W sizes for 3D patch of video.
     """
     def __init__(
         self,
@@ -671,24 +685,31 @@ class TransformerBlock(nn.Module):
         d_ffn: int,
         dropout: float,
         eps: float,
+        patch_size: Tuple[int, int, int],
     ):
         super().__init__()
 
-        self.attention_block = AttentionBlock(d_model, num_heads, query_groups, rope_theta, eps, dropout)
+        self.attention_block = AttentionBlock(d_model, num_heads, query_groups, rope_theta, eps, dropout, patch_size)
         self.gated_ffn_block = GatedFFNBlock(d_model, d_ffn, dropout, eps)
 
-    def forward(self, x: torch.Tensor, window_size: Optional[Tuple[int, int]] = None):
+    def forward(
+        self, 
+        x: torch.Tensor,
+        grid_size: Tuple[int, int, int],
+        window_size: Optional[Tuple[int, int]] = None,
+    ) -> torch.Tensor:
         """Perform forward pass of the Transformer block.
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, N, d_model].
+            grid_size (Tuple[int, int, int]): Grid size parameter for RoPE.
             window_size (Optional[Tuple[int, int]]): Window size for SWA.
 
         Returns:
             torch.Tensor: Output tensor of shape [B, N, d_model].
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return self.gated_ffn_block(self.attention_block(x, window_size))
+            return self.gated_ffn_block(self.attention_block(x, grid_size, window_size))
         
 
 class VideoTransformer(nn.Module):
@@ -721,6 +742,7 @@ class VideoTransformer(nn.Module):
                 d_ffn=model_args.d_ffn,
                 dropout=model_args.dropout,
                 eps=model_args.rms_norm_eps,
+                patch_size=model_args.patch_size,
             ) for _ in range(model_args.num_layers)
         ])
 
@@ -818,7 +840,7 @@ class VideoTransformer(nn.Module):
         """Perform forward pass of the entire video transformer.
         
         Args:
-            x (torch.Tensor): Input tensor of shape [B, T, C, H, W].
+            x (torch.Tensor): Input tensor of shape [B, C, T, H, W].
 
         Returns:
             torch.Tensor: Returns logits of shape [B, num_classses].
@@ -829,9 +851,19 @@ class VideoTransformer(nn.Module):
         # Pass through transformer encoder layers
         for layer in self.layers:
             if self.model_args.use_checkpointing:
-                x = checkpoint(layer, x, self.model_args.window_size, use_reentrant=False)
+                x = checkpoint(
+                    layer, 
+                    x, 
+                    self.model_args.grid_size, 
+                    self.model_args.window_size, 
+                    use_reentrant=False
+                )
             else:
-                x = layer(x, self.model_args.window_size)
+                x = layer(
+                    x, 
+                    self.model_args.grid_size, 
+                    self.model_args.window_size
+                )
 
         # Apply final RMSNorm
         x = self.rms_norm(x)
