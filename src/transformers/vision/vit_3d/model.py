@@ -521,25 +521,18 @@ class Attention(nn.Module):
             B, N, _ = x.shape
             if x.shape != (B, N, self.d_model):
                 raise ValueError(f"Expected x shape to be [B, N, d_model], got {x.shape}")
-            if N == 0:
-                # Unlikely for video transformers (only will occur if something goes totally wrong)
-                return torch.empty(B, 0, self.d_model, device=x.device, dtype=x.dtype)
 
             # Project QKV
             qkv = self.w_qkv(x) # [B, N, num_heads * head_dim + 2 * query_groups * head_dim]
 
-            # q shape: [B, N, num_heads * head_dim]
-            # kv shape: [B, N, 2 * query_groups * head_dim]
+            # q shape: [B, N, num_heads * head_dim], kv shape: [B, N, 2 * query_groups * head_dim]
             q, kv = torch.split(qkv, [self.num_heads * self.head_dim, 2 * self.query_groups * self.head_dim], dim=-1)
+            k, v = torch.chunk(kv, 2, dim=-1) # [B, N, head_dim, query_groups]
 
-            # k shape: [B, N, query_groups * head_dim]
-            # v shape: [B, N, query_groups * head_dim]
-            k, v = torch.chunk(kv, 2, dim=-1)
-
-            # Reshape into 4D tensors for GQA
-            q = q.view(B, N, self.num_heads, self.head_dim) # [B, N, num_heads, head_dim]
-            k = k.view(B, N, self.query_groups, self.head_dim) # [B, N, query_groups, head_dim]
-            v = v.view(B, N, self.query_groups, self.head_dim) # [B, N, query_groups, head_dim]
+            # q shape: [B, N, num_heads, head_dim], k, v shape: [B, N, query_groups, head_dim]
+            q = q.view(B, N, self.num_heads, self.head_dim)
+            k = k.view(B, N, self.query_groups, self.head_dim)
+            v = v.view(B, N, self.query_groups, self.head_dim)
 
             # Apply RoPE3D to qk tensors
             q = self.rope(q, grid_size)
@@ -835,7 +828,30 @@ class VideoTransformer(nn.Module):
             # Scale FFN output projection  
             if hasattr(layer.gated_ffn_block.gated_ffn, 'w2'):
                 layer.gated_ffn_block.gated_ffn.w2.weight.data.mul_(scale_factor)
+    
+    def _compute_grid_size(
+        self,
+        video_shape: Tuple[int, int, int],
+        patch_size: Tuple[int, int, int],
+    ) -> Tuple[int, int, int]:
+        """Compute grid size dynamically based on input T, H, W and patch sizes.
+        
+        Args:
+            video_shape (Tuple[int, int, int]): Input video shape as (T, H, W).
+            patch_size (Tuple[int, int, int]): Patch size as (pt, ph, pw).
 
+        Returns:
+            Tuple[int, int, int]: Returns grid size as (grid_t, grid_h, grid_w).
+        """
+        # Initialize grid dimensions
+        grid_dims = []
+        for dim_length, patch_length in zip(video_shape, patch_size):
+            # Compute the number of patches needed (rounding up to cover all input)
+            num_patches = (dim_length + patch_length - 1) // patch_length
+            grid_dims.append(num_patches)
+
+        return tuple(grid_dims)
+        
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Perform forward pass of the entire video transformer.
         
@@ -845,6 +861,11 @@ class VideoTransformer(nn.Module):
         Returns:
             torch.Tensor: Returns logits of shape [B, num_classses].
         """
+        # Get T, H, W and store as a tuple
+        _, _, T, H, W = x.size() # more readable than x.size()[2:]
+        video_shape = (T, H, W)
+        grid_size = self._compute_grid_size(video_shape=video_shape, patch_size=self.model_args.patch_size)
+
         # Apply patch embeddings and dropout
         x = self.dropout(self.patch_embeddings(x))
 
@@ -854,19 +875,15 @@ class VideoTransformer(nn.Module):
                 x = checkpoint(
                     layer, 
                     x, 
-                    self.model_args.grid_size, 
+                    grid_size,
                     self.model_args.window_size, 
                     use_reentrant=False
                 )
             else:
-                x = layer(
-                    x, 
-                    self.model_args.grid_size, 
-                    self.model_args.window_size
-                )
+                x = layer(x, grid_size, self.model_args.window_size)
 
         # Apply final RMSNorm
-        x = self.rms_norm(x)
+        x = self.rms_norm(x) # [B, N, d_model]
 
         # Apply adaptive average pooling
         x = x.transpose(1, 2) # [B, d_model, N]
