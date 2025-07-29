@@ -1,4 +1,4 @@
-from configs.transformers.vision.vit_3d.setup_env import (
+from configs.setup_env import (
     device,
     dtype,
     use_flash_attn,

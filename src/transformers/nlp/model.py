@@ -1,4 +1,4 @@
-from configs.transformers.nlp.setup_env import (
+from configs.setup_env import (
     device,
     dtype, 
     use_flash_attn, 
@@ -1074,6 +1074,7 @@ class Transformer(nn.Module):
             # Initialize aux loss as float32 tensor
             total_aux_loss = torch.tensor(0.0, dtype=torch.float32).to(device)
 
+            # TODO: look into chunked checkpointing for larger memory savings.
             # Stack transformer layers
             for i, layer in enumerate(self.layers):
                 if self.model_args.gradient_checkpointing:

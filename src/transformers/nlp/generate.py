@@ -1,4 +1,4 @@
-from configs.transformers.nlp.setup_env import device, dtype
+from configs.setup_env import device, dtype
 
 from typing import Optional
 
