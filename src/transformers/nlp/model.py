@@ -532,7 +532,7 @@ class Attention(nn.Module):
                     is_causal=causal if padding_mask is None else False,
                 ) # [B, num_heads, T, head_dim]
 
-                # [B, num_heads, T, head_dim] -> [B, T, num_heads, head_dim]
+                # [B, num_heads, T, head_dim] -> [B, T, d_model]
                 out = out.transpose(1, 2).contiguous().view(B, T, D)
 
             # Get cache output for the Attention layer
