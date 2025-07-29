@@ -1,4 +1,4 @@
-from configs.transformers.nlp.setup_env import device
+from configs.setup_env import device
 
 from typing import Tuple, Optional
 

@@ -1,6 +1,6 @@
-from typing import Tuple
+from configs.setup_env import device
 
-from configs.transformers.vision.vit_2d.setup_env import device
+from typing import Tuple
 
 import torch.nn as nn
 from torch.optim import AdamW, Optimizer

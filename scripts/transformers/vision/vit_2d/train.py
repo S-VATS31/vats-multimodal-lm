@@ -1,4 +1,4 @@
-from configs.transformers.vision.vit_2d.setup_env import device
+from configs.setup_env import device
 
 from typing import Optional, List, Tuple
 import logging
