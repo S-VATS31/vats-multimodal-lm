@@ -5,7 +5,6 @@ from typing import Tuple
 class ModelArgs:
     """Extra small configuration of model arguments, containing 241 million parameters."""
     patch_size: Tuple[int, int, int] = (2, 16, 16)
-    grid_size: Tuple[int, int, int] = (2, 2, 2)
     C_in: int = 3
     d_model: int = 1152
     num_heads: int = 16
