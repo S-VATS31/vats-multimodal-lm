@@ -66,6 +66,7 @@ class PatchEmbeddings(nn.Module):
 
         return x
 
+
 class RMSNorm(nn.Module):
     """RMSNorm layer applied during GQA/FFN block.
 
@@ -89,7 +90,10 @@ class RMSNorm(nn.Module):
             torch.Tensor: Normalized output tensor with same shape.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return (x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)) * self.gamma
+            return (
+                x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+            ) * self.gamma
+
 
 class RoPE(nn.Module):
     """Apply 2D rotary positional embeddings to query, key vectors.
@@ -135,29 +139,28 @@ class RoPE(nn.Module):
                 - torch.Tensor: Sine values for y-axis of shape [1, 1, num_patches, head_dim//4].
                 - torch.Tensor: Cosine values for y-axis of shape [1, 1, num_patches, head_dim//4].
         """
-        with autocast(device_type=device.type, dtype=dtype):
-            if grid_size is None:
-                grid_size = self.grid_size
+        if grid_size is None:
+            grid_size = self.grid_size
 
-            # Create 2D position grid
-            pos_x = torch.arange(grid_size, dtype=self.inv_freq.dtype, device=self.inv_freq.device)
-            pos_y = torch.arange(grid_size, dtype=self.inv_freq.dtype, device=self.inv_freq.device)
+        # Create 2D position grid
+        pos_x = torch.arange(grid_size, dtype=self.inv_freq.dtype, device=self.inv_freq.device)
+        pos_y = torch.arange(grid_size, dtype=self.inv_freq.dtype, device=self.inv_freq.device)
 
-            # Create meshgrid and flatten
-            grid_x, grid_y = torch.meshgrid(pos_x, pos_y, indexing="ij")
-            pos_x_flat = grid_x.flatten().unsqueeze(1) # [num_patches, 1]
-            pos_y_flat = grid_y.flatten().unsqueeze(1) # [num_patches, 1]
+        # Create meshgrid and flatten
+        grid_x, grid_y = torch.meshgrid(pos_x, pos_y, indexing="ij")
+        pos_x_flat = grid_x.flatten().unsqueeze(1) # [num_patches, 1]
+        pos_y_flat = grid_y.flatten().unsqueeze(1) # [num_patches, 1]
 
-            # Compute rotation angles for x and y
-            theta_x = pos_x_flat * self.inv_freq # [num_patches, head_dim//4]
-            theta_y = pos_y_flat * self.inv_freq # [num_patches, head_dim//4]
+        # Compute rotation angles for x and y
+        theta_x = pos_x_flat * self.inv_freq # [num_patches, head_dim//4]
+        theta_y = pos_y_flat * self.inv_freq # [num_patches, head_dim//4]
 
-            # Unsqueeze to match q, k vectors number of dimensions
-            sin_x = torch.sin(theta_x).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
-            cos_x = torch.cos(theta_x).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
-            sin_y = torch.sin(theta_y).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
-            cos_y = torch.cos(theta_y).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
-            return sin_x, cos_x, sin_y, cos_y
+        # Unsqueeze to match q, k vectors number of dimensions
+        sin_x = torch.sin(theta_x).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
+        cos_x = torch.cos(theta_x).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
+        sin_y = torch.sin(theta_y).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
+        cos_y = torch.cos(theta_y).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
+        return sin_x, cos_x, sin_y, cos_y
 
     def create_rotary(
         self,
@@ -179,31 +182,34 @@ class RoPE(nn.Module):
         Returns:
             torch.Tensor: Rotated tensor with shape: [B, T, num_heads, head_dim].
         """
-        with autocast(device_type=device.type, dtype=dtype):
-            # Split head_dim into 4 parts for 2D rotation (x1, x2, y1, y2)
-            freq_dim = self.head_dim // 4
-            x_reshaped = x.reshape(*x.shape[:-1], 4, freq_dim) # [B, T, num_heads, 4, head_dim//4]
-            x1, x2, y1, y2 = x_reshaped.unbind(dim=-2) # Each have shape: [B, T, num_heads, head_dim//4]
+        # Split head_dim into 4 parts for 2D rotation (x1, x2, y1, y2)
+        freq_dim = self.head_dim // 4
+        x_reshaped = x.reshape(*x.shape[:-1], 4, freq_dim) # [B, T, num_heads, 4, head_dim//4]
+        x1, x2, y1, y2 = x_reshaped.unbind(dim=-2) # Each have shape: [B, T, num_heads, head_dim//4]
 
-            # Expand sin/cos to match tensor dimensions
-            sin_x = sin_x.permute(0, 2, 1, 3).expand(x1.shape[0], x1.shape[1], x1.shape[2], x1.shape[3])
-            cos_x = cos_x.permute(0, 2, 1, 3).expand(x1.shape[0], x1.shape[1], x1.shape[2], x1.shape[3])
-            sin_y = sin_y.permute(0, 2, 1, 3).expand(y1.shape[0], y1.shape[1], y1.shape[2], y1.shape[3])
-            cos_y = cos_y.permute(0, 2, 1, 3).expand(y1.shape[0], y1.shape[1], y1.shape[2], y1.shape[3])
+        # Expand sin/cos to match tensor dimensions
+        sin_x = sin_x.permute(0, 2, 1, 3).expand(x1.shape[0], x1.shape[1], x1.shape[2], x1.shape[3])
+        cos_x = cos_x.permute(0, 2, 1, 3).expand(x1.shape[0], x1.shape[1], x1.shape[2], x1.shape[3])
+        sin_y = sin_y.permute(0, 2, 1, 3).expand(y1.shape[0], y1.shape[1], y1.shape[2], y1.shape[3])
+        cos_y = cos_y.permute(0, 2, 1, 3).expand(y1.shape[0], y1.shape[1], y1.shape[2], y1.shape[3])
 
-            # Apply 2D rotary embeddings
-            x1_rot = x1 * cos_x - x2 * sin_x
-            x2_rot = x1 * sin_x + x2 * cos_x
-            y1_rot = y1 * cos_y - y2 * sin_y
-            y2_rot = y1 * sin_y + y2 * cos_y
+        # Apply 2D rotary embeddings
+        # Complex multiplication via rotation matrix
+        # rotation matrix = [[cos(x), -sin(x)], [sin(x), cos(x)]]
+        # x_rot = x * rotation_matrix
+        # y_rot = y * rotation_matrix
+        x1_rot = x1 * cos_x - x2 * sin_x
+        x2_rot = x1 * sin_x + x2 * cos_x
+        y1_rot = y1 * cos_y - y2 * sin_y
+        y2_rot = y1 * sin_y + y2 * cos_y
 
-            # Stack back together
-            x_rotated = torch.stack((x1_rot, x2_rot, y1_rot, y2_rot), dim=-2) # [B, T, num_heads, 4, head_dim//4]
-            x_rotated = x_rotated.reshape(*x.shape) # [B, T, num_heads, head_dim]
-            return x_rotated
+        # Stack back together
+        x_rotated = torch.stack((x1_rot, x2_rot, y1_rot, y2_rot), dim=-2) # [B, T, num_heads, 4, head_dim//4]
+        x_rotated = x_rotated.reshape(*x.shape) # [B, T, num_heads, head_dim]
+        return x_rotated
 
-    def apply_rope_to_tensor(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply 2D rotary positional embeddings to input tensor.
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply 2D rotary positional embeddings to input tensors (qk tensors).
 
         Args:
             x (torch.Tensor): Input tensor of shape: [B, num_heads, T, head_dim]
@@ -211,56 +217,23 @@ class RoPE(nn.Module):
         Returns:
             torch.Tensor: Tensor with applied 2D rotary positional embeddings of shape: [B, num_heads, T, head_dim].
         """
-        with autocast(device_type=device.type, dtype=dtype):
-            T = x.size(2)
+        B, num_heads, T, head_dim = x.size()
+        
+        # Transpose to [B, T, num_heads, head_dim] for processing
+        x_transposed = x.transpose(1, 2) # [B, T, num_heads, head_dim]
 
-            # Reshape to [B, T, num_heads, head_dim]
-            x_reshaped = x.transpose(1, 2) # [B, T, num_heads, head_dim]
+        # Calculate grid size from number of patches
+        grid_size = int(math.sqrt(T - 1)) # Exclude CLS token for grid size calculation
+        sin_x, cos_x, sin_y, cos_y = self.compute_sine_cosine(grid_size)
 
-            # Calculate grid size from number of patches
-            grid_size = int(math.sqrt(T - 1)) # Exclude CLS token for grid size calculation
-            sin_x, cos_x, sin_y, cos_y = self.compute_sine_cosine(grid_size)
+        # Apply RoPE only to patch tokens (skip CLS token at position 0)
+        cls_token_x = x_transposed[:, :1, :, :] # [B, 1, num_heads, head_dim]
+        patch_tokens_x = x_transposed[:, 1:, :, :] # [B, T-1, num_heads, head_dim]
+        rotated_patch_tokens = self.create_rotary(patch_tokens_x, sin_x, cos_x, sin_y, cos_y)
+        x_final = torch.cat([cls_token_x, rotated_patch_tokens], dim=1) # [B, T, num_heads, head_dim]
 
-            # Apply RoPE only to patch tokens (skip CLS token at position 0)
-            cls_token_x = x_reshaped[:, :1, :, :] # [B, 1, num_heads, head_dim]
-            patch_tokens_x = x_reshaped[:, 1:, :, :] # [B, T-1, num_heads, head_dim]
-            rotated_patch_tokens = self.create_rotary(patch_tokens_x, sin_x, cos_x, sin_y, cos_y)
-            x_final = torch.cat([cls_token_x, rotated_patch_tokens], dim=1) # [B, T, num_heads, head_dim]
-
-            # Transpose back to [B, num_heads, T, head_dim]
-            return x_final.transpose(1, 2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply 2D rotary positional embeddings to input tensors (qk tensors).
-
-        Args:
-            x (torch.Tensor): Input tensor of shape: [B, T, d_model]
-
-        Returns:
-            torch.Tensor: Tensor with applied 2D rotary positional embeddings of shape: [B, T, d_model].
-
-        Raises:
-            ValueError if `d_model` is not divisible by `head_dim`.
-        """
-        with autocast(device_type=device.type, dtype=dtype):
-            B, T, d_model = x.size()
-            if d_model % self.head_dim != 0:
-                raise ValueError(f"d_model ({d_model}) must be divisible by head_dim ({self.head_dim})")
-
-            num_heads = d_model // self.head_dim
-            x = x.view(B, T, num_heads, self.head_dim) # [B, T, num_heads, head_dim]
-
-            # Calculate grid size from number of patches
-            grid_size = int(math.sqrt(T - 1)) # Exclude CLS token for grid size calculation
-            sin_x, cos_x, sin_y, cos_y = self.compute_sine_cosine(grid_size)
-
-            # Apply RoPE only to patch tokens (skip CLS token at position 0)
-            cls_token_x = x[:, :1, ...] # [B, 1, num_heads, head_dim]
-            patch_tokens_x = x[:, 1:, ...] # [B, T-1, num_heads, head_dim]
-            rotated_patch_tokens = self.create_rotary(patch_tokens_x, sin_x, cos_x, sin_y, cos_y)
-            x = torch.cat([cls_token_x, rotated_patch_tokens], dim=1) # [B, T, num_heads, head_dim]
-            x = x.view(B, T, d_model)
-            return x # [B, T, d_model]
+        # Transpose back to [B, num_heads, T, head_dim]
+        return x_final.transpose(1, 2)
 
 class GroupedQueryAttention(nn.Module):
     """Grouped query attention layer.
@@ -315,7 +288,7 @@ class GroupedQueryAttention(nn.Module):
     def forward(
         self, x: torch.Tensor, 
         window_size: Tuple[int, int], 
-        attn_method: str = "manual"
+        attn_method: str = "torch-sdpa"
     ) -> torch.Tensor:
         """Perform forward pass of Attention layer.
 
@@ -352,18 +325,18 @@ class GroupedQueryAttention(nn.Module):
             v = self.v_proj(x).reshape(B, T, self.query_groups, self.head_dim).transpose(1, 2) # [B, query_groups, T, head_dim]
 
             # Apply RoPE to q and k using the new method that handles the correct tensor shapes
-            q = self.rope_module.apply_rope_to_tensor(q) # [B, num_heads, T, head_dim]
-            k = self.rope_module.apply_rope_to_tensor(k) # [B, query_groups, T, head_dim]
+            q = self.rope_module(q) # [B, num_heads, T, head_dim]
+            k = self.rope_module(k) # [B, query_groups, T, head_dim]
 
             # Compute heads_per_group for GQA
             heads_per_group = self.num_heads // self.query_groups
 
+            # Expand kv heads to num heads for GQA
+            k_expanded = self.expand(k, heads_per_group, dim_to_repeat=1)
+            v_expanded = self.expand(v, heads_per_group, dim_to_repeat=1)
+
             # Flash Attention 2 + GQA + SWA
             if attn_method == "flash-attn" and use_flash_attn and device.type == "cuda":
-                # Expand k and v to match the number of query heads
-                k_expanded = self.expand(k, heads_per_group, dim_to_repeat=1)
-                v_expanded = self.expand(v, heads_per_group, dim_to_repeat=1)
-
                 # Stack tensors along the 3rd dimension
                 qkv_packed = torch.stack([q, k_expanded, v_expanded], dim=3).contiguous() # [B, T, num_heads, 3, head_dim]
                 # Cumulative sequence lengths for all T
@@ -387,9 +360,6 @@ class GroupedQueryAttention(nn.Module):
 
             # Manual integration of GQA
             elif attn_method == "manual":
-                # Expand kv heads to num heads for GQA
-                k_expanded = self.expand(k, heads_per_group, dim_to_repeat=1)
-                v_expanded = self.expand(v, heads_per_group, dim_to_repeat=1)
                 if q.shape[-1] != k_expanded.shape[-1]:
                     raise ValueError(
                         f"q.shape[-1] ({q.shape[-1]}) must be equal to k_expanded.shape[-1] ({k_expanded.shape[-1]}) for matrix multiplication."
@@ -408,9 +378,8 @@ class GroupedQueryAttention(nn.Module):
             # PyTorch SDPA (leverages Flash Attention if available)
             elif attn_method == "torch-sdpa":
                 attn_out = F.scaled_dot_product_attention(
-                    q, k, v,
+                    q, k_expanded, v_expanded,
                     is_causal=False,
-                    enable_gqa=True # Expands kv_heads heads_per_group times
                 ) # [B, num_heads, T, head_dim]
 
             # Invalid attention method
