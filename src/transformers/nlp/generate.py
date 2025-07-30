@@ -10,8 +10,6 @@ from src.transformers.nlp.model import Transformer, KVCache
 from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 from configs.transformers.nlp.generation_args import GenerationArgs
 
-# TODO: add repetition penalty
-
 class AutoregressiveTokenGenerator:
     def __init__(self, model_args: ModelArgs):
         self.model_args = model_args
@@ -35,6 +33,7 @@ class AutoregressiveTokenGenerator:
         self,
         input_ids: torch.Tensor,
         max_new_tokens: int,
+        repetition_penalty: Optional[float] = None,
         temperature: Optional[float] = None,
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
@@ -49,6 +48,7 @@ class AutoregressiveTokenGenerator:
         Args:
             input_ids (torch.Tensor): int64 tensor containing tokens.
             max_new_tokens (int): Maximum number of tokens the model can generate at a time.
+            repetition_penalty (float): Penalty that scales logits to discourage repetitive tokens.
             temperature (float): Decoding method to encourage more randomness/determinism based on value.
             top_k (int): Top-k logits to be sampled.
             top_p (float): Top-p hyperparameter used as a threshold for masking out certain logits.
@@ -124,6 +124,22 @@ class AutoregressiveTokenGenerator:
 
                 # Get logits for the last position
                 next_token_logits = logits[:, -1, :]
+
+                # Apply repetition penatly
+                if repetition_penalty is not None and repetition_penalty != 1.0:
+                    logits_B, vocab_size = next_token_logits.size()
+                    for batch_idx in range(logits_B):
+                        # Get unique tokens
+                        unique_tokens = torch.unique(generated_ids[batch_idx])
+                        # Apply repetition penalty
+                        for token_id in unique_tokens:
+                            if 0 <= token_id <= vocab_size:
+                                # Discourage repeating of token
+                                if next_token_logits[batch_idx, token_id] > 0:
+                                    next_token_logits[batch_idx, token_id] /= repetition_penalty
+                                # Model confident in logit, increase probability
+                                else:
+                                    next_token_logits[batch_idx, token_id] *= repetition_penalty
 
                 # Apply temperature
                 if temperature is not None:
@@ -229,6 +245,7 @@ class AutoregressiveTokenGenerator:
                 generated_ids = self._generate(
                     input_ids=input_ids,
                     max_new_tokens=generation_args.max_new_tokens,
+                    repetition_penalty=generation_args.repetition_penalty,
                     temperature=generation_args.temperature,
                     top_k=generation_args.top_k,
                     top_p=generation_args.top_p,
@@ -245,4 +262,3 @@ class AutoregressiveTokenGenerator:
         else:
             generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
         return generated_text
-    
