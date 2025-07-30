@@ -26,6 +26,6 @@ class GenerationArgs:
     pad_token_id: Optional[int] = None
     eos_token_id: Optional[int] = None  # Typically: eos_token_id = vocab_size - 1
     use_cache: bool = True
-    repetition_penalty: float = 1.5  # TODO: add repetition penalty or deprecate.
+    repetition_penalty: float = 1.5
     return_only_new_tokens: bool = True
     generation_frequency: int = 10_000_000_000
