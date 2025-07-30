@@ -217,7 +217,7 @@ class RoPE(nn.Module):
         Returns:
             torch.Tensor: Tensor with applied 2D rotary positional embeddings of shape: [B, num_heads, T, head_dim].
         """
-        B, num_heads, T, head_dim = x.size()
+        T = x.size(2)
         
         # Transpose to [B, T, num_heads, head_dim] for processing
         x_transposed = x.transpose(1, 2) # [B, T, num_heads, head_dim]
@@ -235,6 +235,7 @@ class RoPE(nn.Module):
         # Transpose back to [B, num_heads, T, head_dim]
         return x_final.transpose(1, 2)
 
+
 class GroupedQueryAttention(nn.Module):
     """Grouped query attention layer.
 
@@ -243,22 +244,39 @@ class GroupedQueryAttention(nn.Module):
         num_heads (int): Number of attention heads for queries.
         query_groups (int): Number of key/value groups (heads).
         rope_module (RoPE): An instance of the RoPE module for applying rotary embeddings.
+        attn_method (str): Attention method.
+            `flash-attn` for GQA + Flash Attention 2 + SWA + GQA.
+            `torch-spda` for PyTorch's scaled dot product attention + GQA.
+            `manual`     for manual integration of GQA.
 
     Raises:
         ValueError: If `d_model` is not divisible by `num_heads`.
         ValueError: If `num_heads` is not divisible by `query_groups`.
     """
-    def __init__(self, d_model: int, num_heads: int, query_groups: int, rope_module: RoPE):
+    def __init__(
+        self, 
+        d_model: int, 
+        num_heads: int, 
+        query_groups: int, 
+        rope_module: RoPE,
+        attn_method: str = "torch-sdpa",
+    ):
         super().__init__()
+
+        if d_model % num_heads != 0:
+            raise ValueError(
+                f"d_model ({d_model}) must be divible by num_heads ({num_heads})"
+                )
+        if num_heads % query_groups != 0:
+            raise ValueError(
+                f"num_heads ({num_heads}) must be divisible by query_groups ({query_groups})"
+                )
 
         self.d_model = d_model
         self.num_heads = num_heads
         self.query_groups = query_groups
         self.head_dim = d_model // num_heads
-        if d_model % num_heads != 0:
-            raise ValueError(f"d_model ({d_model}) must be divible by num_heads ({num_heads})")
-        if num_heads % query_groups != 0:
-            raise ValueError(f"num_heads ({num_heads}) must be divisible by query_groups ({query_groups})")
+        self.attn_method = attn_method
 
         # Learnable weight matrices
         self.q_proj = nn.Linear(d_model, self.head_dim * self.num_heads)
@@ -267,7 +285,7 @@ class GroupedQueryAttention(nn.Module):
         self.o_proj = nn.Linear(d_model, d_model)
         self.rope_module = rope_module
 
-    def expand(
+    def _expand(
         self, 
         input_tensor: torch.Tensor, 
         heads_per_group: int, 
@@ -287,18 +305,13 @@ class GroupedQueryAttention(nn.Module):
 
     def forward(
         self, x: torch.Tensor, 
-        window_size: Tuple[int, int], 
-        attn_method: str = "torch-sdpa"
+        window_size: Tuple[int, int]
     ) -> torch.Tensor:
         """Perform forward pass of Attention layer.
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model] where T includes CLS token.
             window_size (Tuple[int, int]): Window size for sliding window attention.
-            attn_method (str): Attention method.
-                `flash-attn` for GQA + Flash Attention 2 + SWA + GQA.
-                `torch-spda` for PyTorch's scaled dot product attention + GQA.
-                `manual`     for manual integration of GQA.
 
         Returns:
             torch.Tensor: Output tensor transformed with same shape.
@@ -315,9 +328,6 @@ class GroupedQueryAttention(nn.Module):
             B, T, D = x.shape
             if D != self.d_model:
                 raise ValueError(f"D ({D}) must be equal to d_model ({self.d_model}).")
-            # Return empty output tensor if sequence length is 0 (unlikely for vision)
-            if T == 0:
-                return torch.empty(B, 0, D, device=x.device)
 
             # Linear projections
             q = self.q_proj(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2) # [B, num_heads, T, head_dim]
@@ -332,16 +342,16 @@ class GroupedQueryAttention(nn.Module):
             heads_per_group = self.num_heads // self.query_groups
 
             # Expand kv heads to num heads for GQA
-            k_expanded = self.expand(k, heads_per_group, dim_to_repeat=1)
-            v_expanded = self.expand(v, heads_per_group, dim_to_repeat=1)
+            k_expanded = self._expand(k, heads_per_group, dim_to_repeat=1)
+            v_expanded = self._expand(v, heads_per_group, dim_to_repeat=1)
 
             # Flash Attention 2 + GQA + SWA
-            if attn_method == "flash-attn" and use_flash_attn and device.type == "cuda":
+            if self.attn_method == "flash-attn" and use_flash_attn and device.type == "cuda":
                 # Stack tensors along the 3rd dimension
                 qkv_packed = torch.stack([q, k_expanded, v_expanded], dim=3).contiguous() # [B, T, num_heads, 3, head_dim]
                 # Cumulative sequence lengths for all T
                 cu_seqlens = torch.arange(0, (B + 1) * T, step=T, dtype=torch.int32).to(device)
-                max_seqlen = k.size(2)
+                max_seqlen = k_expanded.size(2)
                 total_tokens = B * max_seqlen
                 qkv_flattened = qkv_packed.view(total_tokens, self.num_heads, 3, self.head_dim)
 
@@ -359,7 +369,7 @@ class GroupedQueryAttention(nn.Module):
                 attn_out = attn_out.contiguous().view(B, T, self.num_heads, self.head_dim)
 
             # Manual integration of GQA
-            elif attn_method == "manual":
+            elif self.attn_method == "manual":
                 if q.shape[-1] != k_expanded.shape[-1]:
                     raise ValueError(
                         f"q.shape[-1] ({q.shape[-1]}) must be equal to k_expanded.shape[-1] ({k_expanded.shape[-1]}) for matrix multiplication."
@@ -376,7 +386,7 @@ class GroupedQueryAttention(nn.Module):
                 attn_out = torch.matmul(softmax_attn, v_expanded)
 
             # PyTorch SDPA (leverages Flash Attention if available)
-            elif attn_method == "torch-sdpa":
+            elif self.attn_method == "torch-sdpa":
                 attn_out = F.scaled_dot_product_attention(
                     q, k_expanded, v_expanded,
                     is_causal=False,
@@ -384,11 +394,12 @@ class GroupedQueryAttention(nn.Module):
 
             # Invalid attention method
             else:
-                raise ValueError(f"Expected 'flash-attn', 'torch-sdpa', or 'manual', got {attn_method}")
+                raise ValueError(f"Expected 'flash-attn', 'torch-sdpa', or 'manual', got {self.attn_method}")
 
             # Concatenate heads
             attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, D) # [B, T, d_model]
             return self.o_proj(attn_out)
+
 
 class GQABlock(nn.Module):
     """GQA layer with dropout, RMSNorm and residuals applied.
@@ -416,7 +427,8 @@ class GQABlock(nn.Module):
             torch.Tensor: Output tensor with RMSNorm, GQA, Dropout, and residuals applied.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return x + self.dropout(self.attn.forward(self.rms_norm(x), window_size))
+            return x + self.dropout(self.attn(self.rms_norm(x), window_size))
+
 
 class FFN(nn.Module):
     """Feed forward network with SwiGLU activation.
@@ -446,6 +458,7 @@ class FFN(nn.Module):
         with autocast(device_type=device.type, dtype=dtype):
             return self.dropout(self.linear2(F.silu(self.linear1(x)) * self.linear3(x)))
 
+
 class FFNBlock(nn.Module):
     """FFN block which applies RMSNorm, Dropout, and a pass through the FFN.
 
@@ -472,6 +485,7 @@ class FFNBlock(nn.Module):
         """
         with autocast(device_type=device.type, dtype=dtype):
             return x + self.dropout(self.ffn(self.rms_norm(x)))
+
 
 class TransformerEncoder(nn.Module):
     """Encoder block where attention block and FFN blocks are stacked.
@@ -508,9 +522,8 @@ class TransformerEncoder(nn.Module):
             torch.Tensor: Transformed output tensor of same shape.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            x = self.attn_block(x, window_size)
-            x = self.ffn_block(x)
-            return x
+            return self.ffn_block(self.attn_block(x, window_size))
+
 
 class VisionTransformer(nn.Module):
     """Complete Vision Transformer class where the encoder blocks will be stacked.
@@ -592,8 +605,8 @@ class VisionTransformer(nn.Module):
                 if self.model_args.use_checkpointing:
                     x = checkpoint(
                         layer, 
-                        x=x, 
-                        window_size=self.model_args.window_size, 
+                        x, 
+                        self.model_args.window_size, 
                         use_reentrant=False
                     ) # [B, num_patches + 1, d_model]
                 else:
