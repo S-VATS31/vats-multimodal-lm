@@ -541,7 +541,7 @@ class Attention(nn.Module):
 
             # q shape: [B, N, num_heads * head_dim], kv shape: [B, N, 2 * query_groups * head_dim]
             q, kv = torch.split(qkv, [self.num_heads * self.head_dim, 2 * self.query_groups * self.head_dim], dim=-1)
-            k, v = torch.chunk(kv, 2, dim=-1) # [B, N, head_dim, query_groups]
+            k, v = torch.chunk(kv, 2, dim=-1) # [B, N, head_dim * query_groups]
 
             # q shape: [B, N, num_heads, head_dim], k, v shape: [B, N, query_groups, head_dim]
             q = q.view(B, N, self.num_heads, self.head_dim)
