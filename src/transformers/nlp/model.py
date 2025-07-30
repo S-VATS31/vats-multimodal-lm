@@ -65,7 +65,7 @@ class RoPE(nn.Module):
             # Apply rotary embeddings
             return self._apply_rope(x, cos_freqs, sin_freqs)
 
-    def _update_cache(self, seq_len: int):
+    def _update_cache(self, seq_len: int) -> None:
         """Cache sine and cosine to prevent re-computation during forward pass.
 
         Args:
@@ -335,11 +335,12 @@ class Attention(nn.Module):
 
         self.rope = RoPE(self.head_dim, theta)
 
-    def extend_kv_heads(
+    def _extend_kv_heads(
         self,
         input_tensor: torch.Tensor, 
         heads_per_group: int, 
-        dim_to_repeat: int
+        dim_to_repeat: int,
+        use_mqa: bool = False,
     ):
         """Extend kv heads to query heads (num_heads).
         
@@ -347,11 +348,15 @@ class Attention(nn.Module):
             input_tensor (torch.Tensor): Key or value tensor to be repeated.
             heads_per_group (int): Heads per group computed as num_heads // query_groups.
             dim_to_repeat (int): Dimension to of the input tensor to be repeated.
+            use_mqa (bool): Apply Multi-Query attention instead of GQA.
+                Constraints: query_groups == 1.
 
         Returns:
             torch.Tensor: Key or value tensor with specific dimension extended.
         """
-        return torch.repeat_interleave(input_tensor, heads_per_group, dim=dim_to_repeat)
+        if use_mqa and input_tensor.size(dim_to_repeat) == 1:
+            return input_tensor # MQA, return as is
+        return torch.repeat_interleave(input_tensor, heads_per_group, dim=dim_to_repeat) # GQA, repeat query_groups
 
     def forward(
         self,
@@ -425,20 +430,27 @@ class Attention(nn.Module):
 
             # Compute heads per group for kv heads -> query heads
             heads_per_group = self.num_heads // self.query_groups
+            
+            # Extend KV tensors (if query_groups==1, no expansion is done)
+            k = self._extend_kv_heads(input_tensor=k, heads_per_group=heads_per_group, dim_to_repeat=2)
+            v = self._extend_kv_heads(input_tensor=v, heads_per_group=heads_per_group, dim_to_repeat=2)
 
-            # Extend KV tensors
-            k = self.extend_kv_heads(input_tensor=k, heads_per_group=heads_per_group, dim_to_repeat=2)
-            v = self.extend_kv_heads(input_tensor=v, heads_per_group=heads_per_group, dim_to_repeat=2)
-
-            # FlashAttention 2 - requires CUDA/flash attn 2 available
-            if use_flash_attn and device.type == "cuda":
+            # FlashAttention 2 - requires CUDA/flash attn available/bf16 or fp16
+            if (
+                use_flash_attn  and device.type == "cuda"
+                and q.dtype in [torch.float16, torch.bfloat16]
+                and k.dtype in [torch.float16, torch.bfloat16]
+                and v.dtype in [torch.float16, torch.bfloat16]
+            ):
                 qkv_packed = torch.stack([q, k, v], dim=3) # [B, T, num_heads, 3, head_dim]
                 qkv_packed = qkv_packed.contiguous()
 
                 # Handle padding mask for FlashAttention
                 if padding_mask is not None:
                     if padding_mask.shape != (B, T):
-                        raise ValueError(f"Expected padding mask shape [B, T], got {padding_mask.shape}")
+                        raise ValueError(
+                            f"Expected padding mask shape of {(B, T)}, got {padding_mask.shape}"
+                        )
                     # Ensure padding mask is a boolean tensor
                     padding_mask = padding_mask.bool()
                     seq_lens = padding_mask.sum(dim=1).int() # [B]
@@ -509,7 +521,9 @@ class Attention(nn.Module):
                 # Apply padding mask for PyTorch SDPA
                 if padding_mask is not None:
                     if padding_mask.shape != (B, T):
-                        raise ValueError(f"Expected padding mask shape [B, T], got {padding_mask.shape}")
+                        raise ValueError(
+                            f"Expected padding mask of shape ({B, T}), got {padding_mask.shape}"
+                            )
                     padding_mask = padding_mask.bool() # Ensure padding mask is a boolean tensor
                     attn_mask = padding_mask.unsqueeze(1).unsqueeze(2) # [B, 1, 1, T]
                     attn_mask = attn_mask.expand(B, 1, T, k.size(2)) # [B, 1, T_q, T_k]
@@ -553,7 +567,7 @@ class SwiGLUExpert(nn.Module):
         super().__init__()
 
         self.weight1 = nn.Linear(d_model, d_ffn)
-        self.weight2 = nn.Linear(d_ffn, d_model)
+        self.weight2 = nn.Linear(d_ffn, d_model) # Output projection layer
         self.weight3 = nn.Linear(d_model, d_ffn)
         self.dropout = nn.Dropout(p=dropout)
 
@@ -635,11 +649,11 @@ class TopKRouter(nn.Module):
             # Compute auxiliary loss
             aux_loss = torch.tensor(0.0).to(x.device)
             if self.use_aux_loss and self.training:
-                aux_loss = self.compute_aux_loss(prob_scores)
+                aux_loss = self._compute_aux_loss(prob_scores)
 
             return expert_weights, expert_indices, aux_loss
 
-    def compute_aux_loss(self, prob_scores: torch.Tensor) -> torch.Tensor:
+    def _compute_aux_loss(self, prob_scores: torch.Tensor) -> torch.Tensor:
         """Compute the auxiliary loss if applicable.
 
         Args:
@@ -1058,9 +1072,8 @@ class Transformer(nn.Module):
                 - Sum of auxiliary losses from all MoE layers.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
-            # Ensure input_ids is a LongTensor (int64) for embeddings
-            if input_ids.dtype != torch.int64:
-                input_ids = input_ids.to(torch.int64)
+            # Ensure input_ids.dtype == torch.int64 for embeddings
+            input_ids = input_ids.to(torch.int64)
 
             # Apply embeddings
             x = self.token_embed(input_ids) # [B, T, d_model]
