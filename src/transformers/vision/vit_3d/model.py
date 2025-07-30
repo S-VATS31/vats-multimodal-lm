@@ -6,7 +6,6 @@ from configs.setup_env import (
 )
 
 from typing import Tuple, Optional
-import logging
 
 import torch
 import torch.nn as nn
@@ -15,10 +14,6 @@ from torch.amp import autocast
 from torch.utils.checkpoint import checkpoint
 
 from configs.transformers.vision.vit_3d.model_args.model_args_large import ModelArgs
-from utils.setup_logger import setup_logger
-
-# Set up logger
-logger = setup_logger(name="train_logger", log_file="training.log", level=logging.INFO)
 
 class PatchEmbeddings3D(nn.Module):
     """Patch embeddings to split the video into 3D patches for spatiotemporal transformers.
@@ -356,7 +351,7 @@ class Attention(nn.Module):
         self.w_qkv = nn.Linear(
             d_model,
             num_heads * self.head_dim + 2 * query_groups * self.head_dim,
-            bias=False, 
+            bias=False, # decrease parameter count
             dtype=dtype
         )
 
@@ -376,6 +371,7 @@ class Attention(nn.Module):
         kv_tensor: torch.Tensor,
         heads_per_group: int,
         kv_heads_dim: int,
+        use_mqa: bool = False, 
     ) -> torch.Tensor:
         """Extend kv heads to num_heads.
         
@@ -383,11 +379,16 @@ class Attention(nn.Module):
             kv_tensor (torch.Tensor): Input key or value tensor.
             heads_per_group (int): Heads per group computed as num_heads // query_groups.
             kv_heads_dim (int): Dimension to be repeated.
+            use_mqa (bool): Whether to use Multi-Query attention or not. Constraints: query_groups == 1.
+                It is not recommended to set use_mqa=True for video transformers unless you are
+                training on extremely long videos.
 
         Returns:
             torch.Tensor: K or V tensor with kv heads dimension repeated, now equal to num_heads.
         """
-        return torch.repeat_interleave(kv_tensor, repeats=heads_per_group, dim=kv_heads_dim)
+        if use_mqa and kv_tensor.size(kv_heads_dim) == 1:
+            return kv_tensor # MQA, return with query_groups == 1
+        return torch.repeat_interleave(kv_tensor, repeats=heads_per_group, dim=kv_heads_dim) # GQA, expand kv heads
     
     def _optimized_attention(
         self,
@@ -411,16 +412,24 @@ class Attention(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape [B, N, d_model].
         """
-        # We can only use flash attn if the import works and device is cuda
-        if use_flash_attn and device.type == "cuda":
-            logger.info("Using Flash Attention 2 + GQA + SWA")
+        # Optimized Flash Attention 2 + SWA + GQA or MQA route
+        # Requirements:
+        # - Flash attention import must be succesful
+        # - `device` must be cuda
+        # - qkv tensors must have a dtype bf16/fp16.
+        if (
+            use_flash_attn and device.type == "cuda"
+            and query.dtype in [torch.float16, torch.bfloat16]
+            and key.dtype in [torch.float16, torch.bfloat16] 
+            and value.dtype in [torch.float16, torch.bfloat16]
+        ):
             # Check if kv heads need to be extended 
             if query.size(2) != key.size(2) or query.size(2) != value.size(2):
                 # Extended kv heads for GQA
                 key = self._extend_kv_heads(
                     kv_tensor=key, 
                     heads_per_group=self.heads_per_group,
-                    kv_heads_dim=2
+                    kv_heads_dim=2,
                 )
                 value = self._extend_kv_heads(
                     kv_tensor=value, 
@@ -456,7 +465,6 @@ class Attention(nn.Module):
         
         # Either import didn't work, or no cuda; fallback to gqa/flash attn, w/o swa
         else:
-            logger.info("Using PyTorch's SDPA + flash attention if available.")
             return self._grouped_query_attention(query, key, value, B, N)
 
     def _grouped_query_attention(
