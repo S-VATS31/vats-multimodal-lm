@@ -32,5 +32,3 @@ class ModelArgs:
             raise ValueError(f"Expected left and right windows to be equal, got {self.window_size[0]} != {self.window_size[1]}")
         if len(self.patch_size) != 3:
             raise ValueError(f"Expected len(patch_size) == 3 for T, H, W dimensions, got {len(self.patch_size)} != 3.")
-        if len(self.grid_size) != 3:
-            raise ValueError(f"Expected len(grid_size) == 3 for T, H, W dimensions, got {len(self.grid_size)} != 3.")
