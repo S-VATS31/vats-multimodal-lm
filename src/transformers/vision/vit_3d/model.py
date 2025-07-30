@@ -5,6 +5,7 @@ from configs.setup_env import (
     flash_attn_varlen_qkvpacked_func
 )
 
+import warnings
 from typing import Tuple, Optional
 
 import torch
@@ -389,7 +390,7 @@ class Attention(nn.Module):
         if use_mqa and kv_tensor.size(kv_heads_dim) == 1:
             return kv_tensor # MQA, return with query_groups == 1
         return torch.repeat_interleave(kv_tensor, repeats=heads_per_group, dim=kv_heads_dim) # GQA, expand kv heads
-    
+
     def _optimized_attention(
         self,
         query: torch.Tensor,
@@ -465,6 +466,7 @@ class Attention(nn.Module):
         
         # Either import didn't work, or no cuda; fallback to gqa/flash attn, w/o swa
         else:
+            warnings.warn("Optimized attention not available, using PyTorch SDPA.")
             return self._grouped_query_attention(query, key, value, B, N)
 
     def _grouped_query_attention(
@@ -559,7 +561,7 @@ class GatedFFN(nn.Module):
     """Gated FFN layer with SwiGLU activation.
 
     Formula:
-        Dropout(SwiGLU(x)) = Dropout(w2 @ (swish(w1 @ x + b1) * (w3 @ x + b3)) + b2)
+        Dropout(SwiGLU(x)) = Dropout(w2 @ (Swish(w1 @ x + b1) * (w3 @ x + b3)) + b2)
         
     Args:
         d_model (int): Dimensionality of the model's embeddings.
