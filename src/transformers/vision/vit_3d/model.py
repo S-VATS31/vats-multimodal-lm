@@ -381,13 +381,17 @@ class Attention(nn.Module):
             heads_per_group (int): Heads per group computed as num_heads // query_groups.
             kv_heads_dim (int): Dimension to be repeated.
             use_mqa (bool): Whether to use Multi-Query attention or not. Constraints: query_groups == 1.
-                It is not recommended to set use_mqa=True for video transformers unless you are
-                training on extremely long videos.
+                It is strongly recommended to set use_mqa=False for video transformers unless you are
+                prioritizing speed/efficiency.
 
         Returns:
             torch.Tensor: K or V tensor with kv heads dimension repeated, now equal to num_heads.
         """
         if use_mqa and kv_tensor.size(kv_heads_dim) == 1:
+            warnings.warn(
+                "Although MQA is memory efficient and fast, it is not recommended on video transformers."
+                "Consider using GQA for reduced memory usage while still maintaining expressiveness."
+            )
             return kv_tensor # MQA, return with query_groups == 1
         return torch.repeat_interleave(kv_tensor, repeats=heads_per_group, dim=kv_heads_dim) # GQA, expand kv heads
 
