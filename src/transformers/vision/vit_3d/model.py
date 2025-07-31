@@ -2,7 +2,9 @@ from configs.setup_env import (
     device,
     dtype,
     use_flash_attn,
-    flash_attn_varlen_qkvpacked_func
+    flash_attn_varlen_qkvpacked_func,
+    use_xformers_swiglu,
+    swiglu
 )
 
 import warnings
@@ -670,7 +672,8 @@ class GatedFFN(nn.Module):
     """Gated FFN layer with SwiGLU activation.
 
     Formula:
-        Dropout(SwiGLU(x)) = Dropout(w2 @ (Swish(w1 @ x + b1) * (w3 @ x + b3)) + b2)
+        Dropout(SwiGLU(x)) = Dropout(w3 @ (Swish(w1 @ x) * (w2 @ x)))
+        Set bias=False, better empirical results.
         
     Args:
         d_model (int): Dimensionality of the model's embeddings.
@@ -680,11 +683,53 @@ class GatedFFN(nn.Module):
     def __init__(self, d_model: int, d_ffn: int, dropout: float):
         super().__init__()
 
-        self.w1 = nn.Linear(d_model, d_ffn)
-        self.w2 = nn.Linear(d_ffn, d_model) # Output projection matrix
-        self.w3 = nn.Linear(d_model, d_ffn)
+        self.w1 = nn.Linear(d_model, d_ffn, bias=False)
+        self.w2 = nn.Linear(d_model, d_ffn, bias=False)
+        self.w3 = nn.Linear(d_ffn, d_model, bias=False) # output projection matrix
         self.dropout = nn.Dropout(p=dropout)
 
+    def _optimized_swiglu(self, x: torch.Tensor) -> torch.Tensor:
+        """Optimized SwiGLU via xformers.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, N, d_model].
+
+        Returns:
+            torch.Tensor: Output tensor of same shape.
+
+        Requirements:
+            xformers import must be succesful
+            `device` must be cuda
+            x.dtype must be float16/bfloat16
+        """
+        with autocast(device_type=device.type, dtype=dtype):
+            # Optimized SwiGLU
+            if (
+                use_xformers_swiglu and device.type == "cuda"
+                and x.dtype in [torch.float16, torch.bfloat16]
+            ):
+                return self.dropout(swiglu(
+                    x.contiguous(), 
+                    self.w1.weight.T, None, 
+                    self.w2.weight.T, None, 
+                    self.w3.weight.T, None
+                ))
+            # Fallback to PyTorch implementation of SwiGLU
+            else:
+                warnings.warn("xformers SwiGLU not available, falling back to PyTorch SwiGLU.")
+                return self._pytorch_swiglu(x)
+    
+    def _pytorch_swiglu(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch implementation of SwiGLU, fallback for xformers SwiGLU.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, N, d_model].
+        
+        Returns:
+            torch.Tensor: Output tensor of same shape.
+        """
+        return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+            
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Perform forward pass of the Gated FFN layer.
         
@@ -692,11 +737,13 @@ class GatedFFN(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, N, d_model].
 
         Returns:
-            torch.Tensor: Output tensor passed through the FFN with same shape.
+            torch.Tensor: Output tensor of same shape.
         """
-        with autocast(device_type=device.type, dtype=dtype):
-            return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
-        
+        assert(
+            x.dim() == 3
+        ), f"x must be a 3 dimensional tensor, got {x.dim()} dimensions"
+
+        return self._optimized_swiglu(x)
 
 class AttentionBlock(nn.Module):
     """Attention block with attention, normalization, dropout, and residuals applied.
