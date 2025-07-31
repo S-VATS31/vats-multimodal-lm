@@ -16,3 +16,12 @@ try:
 except ImportError:
     use_flash_attn = False
     flash_attn_varlen_qkvpacked_func = None
+
+# Import xformers SwiGLU function
+try:
+    from xformers.ops import swiglu
+    use_xformers_swiglu = (device.type == "cuda")
+except:
+    use_xformers_swiglu = False
+    swiglu = None
+    
