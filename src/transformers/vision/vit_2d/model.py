@@ -90,9 +90,9 @@ class RMSNorm(nn.Module):
             torch.Tensor: Normalized output tensor with same shape.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return (
+            return self.gamma * (
                 x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
-            ) * self.gamma
+            )
 
 
 class RoPE(nn.Module):
@@ -278,11 +278,23 @@ class GroupedQueryAttention(nn.Module):
         self.head_dim = d_model // num_heads
         self.attn_method = attn_method
 
-        # Learnable weight matrices
-        self.q_proj = nn.Linear(d_model, self.head_dim * self.num_heads)
-        self.k_proj = nn.Linear(d_model, self.head_dim * self.query_groups)
-        self.v_proj = nn.Linear(d_model, self.head_dim * self.query_groups)
-        self.o_proj = nn.Linear(d_model, d_model)
+        # QKV projection
+        self.w_qkv = nn.Linear(
+            d_model,
+            num_heads * self.head_dim + 2 * query_groups * self.head_dim,
+            bias=False,
+            dtype=dtype
+        )
+
+        # O projection
+        self.w_o = nn.Linear(
+            d_model,
+            num_heads * self.head_dim,
+            bias=False,
+            dtype=dtype
+        )
+
+        # Initialize 2D RoPE
         self.rope_module = rope_module
 
     def _expand(
@@ -328,11 +340,23 @@ class GroupedQueryAttention(nn.Module):
             B, T, D = x.shape
             if D != self.d_model:
                 raise ValueError(f"D ({D}) must be equal to d_model ({self.d_model}).")
+            
+            # Chunked projection matrix
+            qkv = self.w_qkv(x) # [B, T, num_heads * head_dim + 2 * query_groups * head_dim]
 
-            # Linear projections
-            q = self.q_proj(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2) # [B, num_heads, T, head_dim]
-            k = self.k_proj(x).reshape(B, T, self.query_groups, self.head_dim).transpose(1, 2) # [B, query_groups, T, head_dim]
-            v = self.v_proj(x).reshape(B, T, self.query_groups, self.head_dim).transpose(1, 2) # [B, query_groups, T, head_dim]
+            # q: [B, T, num_head * head_dim]
+            # kv: [B, T, 2 * query_groups * head_dim]
+            q, kv = torch.split(qkv, [self.num_heads * self.head_dim, 2 * self.query_groups * self.head_dim], dim=-1)
+
+            # k, v shape: [B, T, query_groups * head_dim]
+            k, v = torch.chunk(kv, chunks=2, dim=-1)
+            
+            # Reshape into 4D tensors for RoPE
+            # q shape: [B, num_heads, T, head_dim]
+            # kv shape: [B, query_groups, T, head_dim]
+            q = q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+            k = k.view(B, T, self.query_groups, self.head_dim).transpose(1, 2)
+            v = v.view(B, T, self.query_groups, self.head_dim).transpose(1, 2)
 
             # Apply RoPE to q and k using the new method that handles the correct tensor shapes
             q = self.rope_module(q) # [B, num_heads, T, head_dim]
@@ -345,6 +369,7 @@ class GroupedQueryAttention(nn.Module):
             k_expanded = self._expand(k, heads_per_group, dim_to_repeat=1)
             v_expanded = self._expand(v, heads_per_group, dim_to_repeat=1)
 
+            # TODO: add checks to make sure dtype in [fp16, bf16]
             # Flash Attention 2 + GQA + SWA
             if self.attn_method == "flash-attn" and use_flash_attn and device.type == "cuda":
                 # Stack tensors along the 3rd dimension
@@ -398,7 +423,7 @@ class GroupedQueryAttention(nn.Module):
 
             # Concatenate heads
             attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, D) # [B, T, d_model]
-            return self.o_proj(attn_out)
+            return self.w_o(attn_out)
 
 
 class GQABlock(nn.Module):
@@ -496,7 +521,7 @@ class TransformerEncoder(nn.Module):
         query_groups (int): Number of key/value groups (heads).
         rope_module (nn.Module): An instance of the RoPE module for applying rotary embeddings.
         d_ffn (int): Dimensionality of the feed-forward network. Typically, d_ffn = 4 * d_model.
-        dropout (float): Regularizes the model and helps prevent dropout.
+        dropout (float): Regularizes the model and helps prevent overfitting.
     """
     def __init__(
         self,
