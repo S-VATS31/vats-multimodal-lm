@@ -39,7 +39,7 @@ class PatchEmbeddings3D(nn.Module):
         self.patch_size = patch_size
         self.d_model = d_model
 
-        # Projection using Conv3D.
+        # Conv3D projection
         self.projection = nn.Conv3d(
             in_channels=C_in,
             out_channels=d_model,
@@ -53,15 +53,17 @@ class PatchEmbeddings3D(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             x (torch.Tensor): Input tensor of shape [B, C_in, T, H, W].
 
         Returns:
             torch.Tensor: Patch embeddings of shape [B, N, d_model].
         """
         with autocast(device_type=x.device.type, dtype=x.dtype):
-            _, _, T, H, W = x.shape
+            assert(
+                x.dim() == 5
+            ), f"x must be a 5 dimenional tensor, got {x.dim()} dimensions"
+            B, _, T, H, W = x.shape
             pt, ph, pw = self.patch_size
             
             # Calculate padding needed to make T, H, W divisible by patch size
@@ -73,8 +75,16 @@ class PatchEmbeddings3D(nn.Module):
             x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_t), mode='constant', value=0)
             
             # Project patch embeddings and flatten
-            x = self.projection(x) # [B, d_model, T, H, W]
-            x = x.flatten(2).transpose(1, 2) # [B, N, d_model]
+            x = self.projection(x) # [B, d_model, T, H, W] C_in (in) -> d_model (out)
+            
+            assert(
+                x.size(1) == self.d_model
+            ), f"x.size(1) must be {self.d_model}, got {x.size(1)}"
+            assert(
+                x.dim() == 5
+            ), f"x must be a 5 dimenional tensor, got {x.dim()} dimensions"
+
+            x = x.view(B, self.d_model, -1).transpose(1, 2) # [B, N, d_model]
 
             # Apply normalization and dropout
             return self.rms_norm(self.dropout(x))
@@ -101,7 +111,7 @@ class RoPE3D(nn.Module):
             raise ValueError(
                 f"head_dim must be divisible by 6 for 3D RoPE (2 dims per spatial dimension), got {head_dim}"
             )
-        
+
         self.head_dim = head_dim
         self.theta = theta
         self.patch_size = patch_size
@@ -389,11 +399,11 @@ class Attention(nn.Module):
         """
         if use_mqa and kv_tensor.size(kv_heads_dim) == 1:
             warnings.warn(
-                "Although MQA is memory efficient and fast, it is not recommended on video transformers."
+                "Although MQA is memory efficient and fast, it is not recommended on video transformers. "
                 "Consider using GQA for reduced memory usage while still maintaining expressiveness."
             )
-            return kv_tensor # MQA, return with query_groups == 1
-        return torch.repeat_interleave(kv_tensor, repeats=heads_per_group, dim=kv_heads_dim) # GQA, expand kv heads
+            return kv_tensor
+        return torch.repeat_interleave(kv_tensor, repeats=heads_per_group, dim=kv_heads_dim)
 
     def _optimized_attention(
         self,
@@ -416,45 +426,65 @@ class Attention(nn.Module):
 
         Returns:
             torch.Tensor: Output tensor of shape [B, N, d_model].
+
+        NOTE: OPTIMIZED ATTENTION HAS NOT BEEN TESTED DUE TO HARDWARE REQUIREMENTS.
         """
         # Optimized Flash Attention 2 + SWA + GQA or MQA route
         # Requirements:
         # - Flash attention import must be succesful
         # - `device` must be cuda
-        # - qkv tensors must have a dtype bf16/fp16.
+        # - qkv tensors must have a dtype of bf16/fp16.
         if (
             use_flash_attn and device.type == "cuda"
             and query.dtype in [torch.float16, torch.bfloat16]
             and key.dtype in [torch.float16, torch.bfloat16] 
             and value.dtype in [torch.float16, torch.bfloat16]
         ):
-            # Check if kv heads need to be extended 
-            if query.size(2) != key.size(2) or query.size(2) != value.size(2):
-                # Extended kv heads for GQA
-                key = self._extend_kv_heads(
-                    kv_tensor=key, 
-                    heads_per_group=self.heads_per_group,
-                    kv_heads_dim=2,
-                )
-                value = self._extend_kv_heads(
-                    kv_tensor=value, 
-                    heads_per_group=self.heads_per_group,
-                    kv_heads_dim=2
-                )
-
             # Concatenate tensors along 3rd dimension
             qkv_packed = torch.stack([query, key, value], dim=3).contiguous() # [B, N, num_heads, 3, head_dim]
 
-            # Get cumulative sequence lengths
-            cu_seqlens = torch.arange(0, (B + 1) * key.size(1), key.size(1), dtype=torch.int32).to(device) # [B + 1]
+            assert(
+                qkv_packed.shape == (B, N, self.num_heads, 3, self.head_dim)
+            ), f"qkv_packed must have shape {(B, N, self.num_heads, 3, self.head_dim)}, got{qkv_packed.shape}"
+            assert(
+                qkv_packed.is_contiguous()
+            ), "qkv_packed must be contiguous."
 
-            # Get max sequence length and compute total tokens
-            max_seqlen = key.size(1)
+            # Get cumulative sequence lengths
+            cu_seqlens = torch.arange(0, (B + 1) * N, N, dtype=torch.int32).to(device) # [B + 1]
+
+            assert(
+                cu_seqlens.shape == (B + 1)
+            ), f"cu_seqlens must have shape {(B + 1)}, got {cu_seqlens.shape}"
+            assert(
+                cu_seqlens.dtype == torch.int32
+            ), f"cu_seqlens dtype must be int32, got {cu_seqlens.dtype}"
+
+            # We can compute the maximum seqeunce length by taking the difference between cumulative sequences
+            # This gives us our true sequence length where we can compute the max
+            seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+            max_seqlen = seq_lens.max().item()
+
+            assert(
+                len(seq_lens) == len(cu_seqlens) - 1
+            ), f"len(seq_lens) must be len(cu_seqlens) - 1, got {len(seq_lens)} != {len(cu_seqlens)} - 1"
+
+            # Compute total tokens
             total_tokens = B * max_seqlen
 
             # Flatten packed tensor
-            qkv_flattened = qkv_packed.view(total_tokens, self.num_heads, 3, self.head_dim)
-
+            qkv_flattened = qkv_packed.view(
+                total_tokens, 
+                self.num_heads, 3, 
+                self.head_dim).transpose(1, 2).contiguous() # [total_tokens, 3, num_heads, head_dim]
+            
+            assert(
+                qkv_flattened.shape == (total_tokens, 3, self.num_heads, self.head_dim)
+            ), f"qkv_flattened must have shape {(total_tokens, 3, self.num_heads, self.head_dim)}, got {qkv_flattened.shape}"
+            assert(
+                qkv_flattened.is_contiguous()
+            ), "qkv_flattened must be contiguous"
+            
             # Call FlashAttention 2
             attn_out = flash_attn_varlen_qkvpacked_func(
                 qkv_flattened,
@@ -463,9 +493,17 @@ class Attention(nn.Module):
                 causal=False,
                 softmax_scale=1.0 / (self.head_dim ** 0.5),
                 window_size=window_size,
-            ) # [B * N, num_heads, head_dim]
+            ) # [total_tokens, num_heads, head_dim]
+
+            assert(
+                attn_out.shape == (total_tokens, self.num_heads, self.head_dim)
+            ), f"attn_out must have shape of {(total_tokens, self.num_heads, self.head_dim)}, got {attn_out.shape}"
 
             attn_out = attn_out.contiguous().view(B, N, -1) # [B, N, d_model]
+            assert(
+                attn_out.shape == (B, N, self.d_model)
+            ), f"attn_out must have shape of {(B, N, self.d_model)}, got {attn_out.shape}"
+
             return attn_out
         
         # Either import didn't work, or no cuda; fallback to gqa/flash attn, w/o swa
@@ -493,26 +531,26 @@ class Attention(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape [B, N, d_model].
         """
-        # Check if kv heads need to be extended
-        if query.size(2) != key.size(2) or query.size(2) != value.size(2):
-            # Extended kv heads for GQA
-            key = self._extend_kv_heads(
-                kv_tensor=key, 
-                heads_per_group=self.heads_per_group,
-                kv_heads_dim=2
-            )
-            value = self._extend_kv_heads(
-                kv_tensor=value, 
-                heads_per_group=self.heads_per_group,
-                kv_heads_dim=2
-            )
-        
+        # q, k, v shape after transpose: [B, num_heads, N, head_dim]
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+
+        # Apply PyTorch SDPA
         attn_out = F.scaled_dot_product_attention(
             query, key, value,
             is_causal=False
         ) # [B, num_heads, N, head_dim]
 
-        attn_out = attn_out.transpose(1, 2).contiguous().view(B, N, self.d_model)
+        assert(
+            attn_out.shape == (B, self.num_heads, N, self.head_dim)
+        ), f"attn_out must have shape of {(B, self.num_heads, N, self.head_dim)}, got {attn_out.shape}"
+
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, N, self.d_model) # [B, N, d_model]
+        assert(
+            attn_out.shape == (B, N, self.d_model)
+        ), f"attn_out must have shape of {(B, N, self.d_model)}, got {attn_out.shape}"
+
         return attn_out
 
     def forward(
@@ -538,25 +576,92 @@ class Attention(nn.Module):
 
             # Project QKV
             qkv = self.w_qkv(x) # [B, N, num_heads * head_dim + 2 * query_groups * head_dim]
+            assert(
+                qkv.shape == (B, N, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim)
+            ), (
+                f"qkv must have shape of {(B, N, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim)} "
+                f"got {qkv.shape}"
+            )
+            
 
             # q shape: [B, N, num_heads * head_dim], kv shape: [B, N, 2 * query_groups * head_dim]
             q, kv = torch.split(qkv, [self.num_heads * self.head_dim, 2 * self.query_groups * self.head_dim], dim=-1)
+            assert(
+                q.shape == (B, N, self.num_heads * self.head_dim)
+            ), f"q must have shape of {(B, N, self.num_heads * self.head_dim)}, got {q.shape}"
+            assert(
+                kv.shape == (B, N, 2 * self.query_groups * self.head_dim)
+            ), f"kv must have shape of {(B, N, 2 * self.query_groups * self.head_dim)}, got {kv.shape}"
+
             k, v = torch.chunk(kv, 2, dim=-1) # [B, N, head_dim * query_groups]
+            assert(
+                k.shape == (B, N, self.head_dim * self.query_groups)
+            ), f"k must have shape of {(B, N, self.head_dim * self.query_groups)}, got {k.shape}"
+            assert(
+                v.shape == (B, N, self.head_dim * self.query_groups)
+            ), f"v must have shape of {(B, N, self.head_dim * self.query_groups)}, got {v.shape}"
 
             # q shape: [B, N, num_heads, head_dim], k, v shape: [B, N, query_groups, head_dim]
             q = q.view(B, N, self.num_heads, self.head_dim)
             k = k.view(B, N, self.query_groups, self.head_dim)
             v = v.view(B, N, self.query_groups, self.head_dim)
+            
+            assert(
+                q.shape == (B, N, self.num_heads, self.head_dim)
+            ), f"q must have shape of {(B, N, self.num_heads, self.head_dim)}, got {q.shape}"
+            assert(
+                k.shape == (B, N, self.query_groups, self.head_dim) or
+                k.shape == (B, N, 1, self.head_dim)
+            ),  f"k must have shape of {(B, N, self.query_groups, self.head_dim)}, got {k.shape}"
+            assert(
+                v.shape == (B, N, self.query_groups, self.head_dim)
+            ), f"v must have shape of {(B, N, self.query_groups, self.head_dim)}, got {v.shape}"
+
+            # Check if kv heads need to be extended 
+            if q.size(2) != k.size(2) or q.size(2) != v.size(2):
+                # Extended kv heads for GQA
+                k = self._extend_kv_heads(
+                    kv_tensor=k, 
+                    heads_per_group=self.heads_per_group,
+                    kv_heads_dim=2,
+                )
+                v = self._extend_kv_heads(
+                    kv_tensor=v, 
+                    heads_per_group=self.heads_per_group,
+                    kv_heads_dim=2
+                )
+            
+            assert(
+                k.size(2) == self.num_heads or k.size(2) == 1
+            ), f"k.size(2) must be equal to {self.num_heads} or 1, got {k.size(2)}"
+            assert(
+                v.size(2) == self.num_heads or v.size(2) == 1
+            ), f"v.size(2) must be equal to {self.num_heads} or 1, got {v.size(2)}"
 
             # Apply RoPE3D to qk tensors
             q = self.rope(q, grid_size)
             k = self.rope(k, grid_size)
+
+            assert(
+                q.shape == (B, N, self.num_heads, self.head_dim)
+            ), f"q must have shape of {(B, N, self.num_heads, self.head_dim)}, got {q.shape}"
+            assert(
+                k.shape == (B, N, self.num_heads, self.head_dim) or
+                k.shape == (B, N, 1, self.head_dim)
+            ), (
+                f"k must have shape of {(B, N, self.num_heads, self.head_dim)} "
+                f"or {(B, N, 1, self.head_dim)} got {k.shape}"
+            )
 
             # Apply optimized attention if available
             if window_size is not None:
                 attn_out = self._optimized_attention(q, k, v, B, N, window_size)
             else:
                 attn_out = self._grouped_query_attention(q, k, v, B, N)
+
+            assert(
+                attn_out.shape == (B, N, self.d_model)
+            ), f"attn_out must have shape of {(B, N, self.d_model)}, got {attn_out.shape}"
 
             return self.w_o(attn_out) # [B, N, d_model]
 
@@ -876,12 +981,19 @@ class VideoTransformer(nn.Module):
             torch.Tensor: Returns logits of shape [B, num_classses].
         """
         # Get T, H, W and store as a tuple
-        _, _, T, H, W = x.size() # more readable than x.size()[2:]
+        _, _, T, H, W = x.size()
+        assert(
+            x.dim() == 5
+        ), f"x must be a 5 dimensional tensor, got {x.dim()} dimensions"
+
         video_shape = (T, H, W)
         grid_size = self._compute_grid_size(video_shape=video_shape, patch_size=self.model_args.patch_size)
 
         # Apply patch embeddings and dropout
-        x = self.dropout(self.patch_embeddings(x))
+        x = self.dropout(self.patch_embeddings(x)) # [B, N, d_model]
+        assert(
+            x.dim() == 3
+        ), f"x must be a 3 dimenional tensor after patch embeddings, got {x.dim()} dimensions."
 
         # Pass through transformer encoder layers
         for layer in self.layers:
@@ -902,8 +1014,31 @@ class VideoTransformer(nn.Module):
         # Apply adaptive average pooling
         x = x.transpose(1, 2) # [B, d_model, N]
         x = self.pool(x) # [B, d_model, 1]
+        assert(
+            x.size(-1) == 1
+        ), f"x.size(-1) must be equal to 1, got {x.size(-1)}"
+
         x = x.squeeze(-1) # [B, d_model]
+        assert(
+            x.dim() == 2
+        ), f"x must be a 2 dimensional tensor, got {x.dim()} dimensions"
 
         # Get logits through classifier
         logits = self.classifier(x)
+        assert(
+            logits.dim() == 2
+        ), f"logits must be a 2 dimensional tensor, got {logits.dim()} dimensions"
+
         return logits # [B, num_classes]
+
+def main():
+    model_args = ModelArgs()
+    model = VideoTransformer(model_args).to(device)
+    B, C, T, H, W = 4, 3, 8, 32, 32
+    x = torch.randn(B, C, T, H, W).to(device)
+    logits = model(x)
+    return logits
+
+if __name__ == "__main__":
+    logits = main()
+    print(logits.shape) # torch.Size([4, 1000])
