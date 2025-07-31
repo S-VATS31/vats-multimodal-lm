@@ -6,6 +6,7 @@ from configs.setup_env import (
 )
 
 import math
+import warnings
 from typing import Dict, List, Tuple, Optional
 
 import torch
@@ -33,7 +34,12 @@ class RoPE(nn.Module):
         self.head_dim = head_dim
 
         # Compute inverse frequency
-        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim)).to(device)
+        # inv_freq = 1 / (theta ^ (2i/d)) where d = head_dim
+        # We set dtype=float32 to maintain numerical stability when exponentiating
+        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)).to(device)
+        assert(
+            inv_freq.dtype == torch.float32
+        ), f"inv_freq must have dtype of float32, got {inv_freq.dtype}"
         self.register_buffer("inv_freq", inv_freq)
 
         # Lazy cache - will be populated as needed to avoid recomputing sin/cos
@@ -59,8 +65,15 @@ class RoPE(nn.Module):
 
             # Use cached values instead of recomputing
             # Update all values up till sequence length
-            cos_freqs = self.cos_cache[:seq_len] # [T, head_dim//2]
-            sin_freqs = self.sin_cache[:seq_len] # [T, head_dim//2]
+            cos_freqs = self.cos_cache[:seq_len] # [T, head_dim // 2]
+            sin_freqs = self.sin_cache[:seq_len] # [T, head_dim // 2]
+
+            assert(
+                cos_freqs.shape == (seq_len, self.head_dim // 2)
+            ), f"cos_freqs must have shape {(seq_len, self.head_dim //2)} got {cos_freqs.shape}"
+            assert(
+                sin_freqs.shape == (seq_len, self.head_dim // 2)
+            ), f"sin_freqs must have shape {(seq_len, self.head_dim //2)} got {sin_freqs.shape}"
 
             # Apply rotary embeddings
             return self._apply_rope(x, cos_freqs, sin_freqs)
@@ -99,15 +112,28 @@ class RoPE(nn.Module):
             torch.Tensor: Rotated output tensor with positional awareness.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
+            if x.dim() != 4:
+                raise ValueError(f"x must have 4 dimensions, got {x.dim()}")
             # Split x into even and odd dimensions
-            x1 = x[..., ::2]
-            x2 = x[..., 1::2]
+            x1 = x[..., ::2]  # even (2i)
+            x2 = x[..., 1::2] # odd (2i+1)
 
             # Expand frequency tensors to match input dimensions
-            cos_freqs = cos_freqs.unsqueeze(0).unsqueeze(2) # [1, T, 1, head_dim//2]
-            sin_freqs = sin_freqs.unsqueeze(0).unsqueeze(2) # [1, T, 1, head_dim//2]
+            # We need these to be 4 dimensional tensors for correct broadcasting
+            cos_freqs = cos_freqs[None, :, None, :] # [1, T, 1, head_dim//2]
+            sin_freqs = sin_freqs[None, :, None, :] # [1, T, 1, head_dim//2]
+
+            assert (
+                cos_freqs.shape == (1, x.size(1), 1, self.head_dim // 2)
+            ), f"cos_freqs must have shape {(1, x.size(1), 1, self.head_dim // 2)}, got {cos_freqs.shape}"
+            assert (
+                sin_freqs.shape == (1, x.size(1), 1, self.head_dim // 2)
+            ), f"sin_freqs must have shape {(1, x.size(1), 1, self.head_dim // 2)}, got {sin_freqs.shape}"
 
             # Complex rotation via rotation matrix
+            # rotation_matrix = [[cos(x), -sin(x)], [sin(x), cos(x)]]
+            # x_even_rot = x_even * rotation_matrix[0]
+            # x_odd_rot = x_odd * rotation_matrix[1]
             rotated_x1 = x1 * cos_freqs - x2 * sin_freqs
             rotated_x2 = x1 * sin_freqs + x2 * cos_freqs
 
@@ -140,6 +166,7 @@ class RoPE(nn.Module):
         sin_freqs = self.sin_cache[:seq_len]
         return cos_freqs, sin_freqs
 
+
 class RMSNorm(nn.Module):
     """Apply RMSNorm to input tensors to normalize their root mean square norm.
 
@@ -167,8 +194,10 @@ class RMSNorm(nn.Module):
             torch.Tensor: Normalized output tensor of same shape.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
-            rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
-            return self.weight * (x / rms)
+            return self.weight * (
+                x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+            )
+
 
 class KVCache:
     """Key-Value cache for efficient autoregressive generation.
@@ -179,8 +208,6 @@ class KVCache:
         num_heads (int): Number of attention heads (or query groups for GQA).
         head_dim (int): Dimension of each attention head.
         num_layers (int): Number of transformer layers.
-        dtype (torch.dtype): Data type for cache tensors. Defaults to global dtype.
-        device (torch.device): Device for cache tensors. Defaults to global device.
     """
     def __init__(
         self,
@@ -189,16 +216,12 @@ class KVCache:
         num_heads: int,
         head_dim: int,
         num_layers: int,
-        dtype: torch.dtype = dtype,
-        device: torch.device = device
     ):
         self.max_batch_size = max_batch_size
         self.max_seq_len = max_seq_len
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.num_layers = num_layers
-        self.dtype = dtype
-        self.device = device
 
         # Initialize cache state to None
         self.cache = None
@@ -225,10 +248,10 @@ class KVCache:
             {
                 'k': torch.zeros((
                     batch_size, self.max_seq_len, self.num_heads, self.head_dim
-                    ), dtype=self.dtype, device=self.device),
+                    ), dtype=dtype).to(device),
                 'v': torch.zeros((
                     batch_size, self.max_seq_len, self.num_heads, self.head_dim
-                    ), dtype=self.dtype, device=self.device)
+                    ), dtype=dtype).to(device)
             }
             for _ in range(self.num_layers)
         ]
@@ -295,6 +318,7 @@ class KVCache:
         self.current_seq_len = None
         self.batch_size = None
 
+
 class Attention(nn.Module):
     """Apply Grouped Query Attention (GQA) to QKV vectors as well as causal masking.
 
@@ -311,6 +335,7 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.query_groups = query_groups
         self.head_dim = d_model // num_heads
+        self.heads_per_group = num_heads // query_groups
 
         if d_model % num_heads != 0:
             raise ValueError(f"d_model ({d_model}) must be divisible by num_heads ({num_heads})")
@@ -337,9 +362,9 @@ class Attention(nn.Module):
 
     def _extend_kv_heads(
         self,
-        input_tensor: torch.Tensor, 
+        kv_tensor: torch.Tensor, 
         heads_per_group: int, 
-        dim_to_repeat: int,
+        kv_heads_dim: int,
         use_mqa: bool = False,
     ):
         """Extend kv heads to query heads (num_heads).
@@ -354,9 +379,14 @@ class Attention(nn.Module):
         Returns:
             torch.Tensor: Key or value tensor with specific dimension extended.
         """
-        if use_mqa and input_tensor.size(dim_to_repeat) == 1:
-            return input_tensor # MQA, return as is
-        return torch.repeat_interleave(input_tensor, heads_per_group, dim=dim_to_repeat) # GQA, repeat query_groups
+        if use_mqa and kv_tensor.size(kv_heads_dim) == 1:
+            warnings.warn(
+                "Using multi-query attention, consider switching to GQA for more expressiveness"
+                )
+            # For MQA, we return tensor as is
+            return kv_tensor
+        # For GQA, we expand kv heads and then return tensor
+        return torch.repeat_interleave(kv_tensor, heads_per_group, dim=kv_heads_dim)
 
     def forward(
         self,
@@ -388,6 +418,8 @@ class Attention(nn.Module):
         Raises:
             ValueError if `x` does not have 3 shape [B, T, d_model].
             ValueError if `padding_mask` does not have shape [B, T].
+
+        NOTE: FLASH ATTENTION 2 + SWA HAS NOT BEEN TESTED DUE TO HARDWARE LIMITATIONS.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
             B, T, D = x.shape
@@ -408,14 +440,36 @@ class Attention(nn.Module):
             # v shape: [B, T, query_groups * head_dim]
             k, v = torch.chunk(kv, 2, dim=-1)
 
+            # Assertions before reshaping
+            assert (
+                q.shape == (B, T, self.num_heads * self.head_dim)
+            ), f"q must have shape {(B, T, self.num_heads * self.head_dim)}, got {q.shape}"
+            assert (
+                k.shape == (B, T, self.query_groups * self.head_dim)
+            ), f"k must have shape {(B, T, self.query_groups * self.head_dim)}, got {k.shape}"
+            assert (
+                v.shape == (B, T, self.query_groups * self.head_dim)
+            ), f"v must have shape {(B, T, self.query_groups * self.head_dim)}, got {v.shape}"
+
             # Reshape into 4D tensors for GQA
-            q = q.view(B, T, self.num_heads, self.head_dim) # [B, T, num_heads, head_dim]
-            k = k.view(B, T, self.query_groups, self.head_dim) # [B, T, query_groups, head_dim]
-            v = v.view(B, T, self.query_groups, self.head_dim) # [B, T, query_groups, head_dim]
+            q = q.contiguous().view(B, T, self.num_heads, self.head_dim) # [B, T, num_heads, head_dim]
+            k = k.contiguous().view(B, T, self.query_groups, self.head_dim) # [B, T, query_groups, head_dim]
+            v = v.contiguous().view(B, T, self.query_groups, self.head_dim) # [B, T, query_groups, head_dim]
 
             # Apply RoPE
             q = self.rope(q) # [B, T, num_heads, head_dim]
             k = self.rope(k) # [B, T, query_groups, head_dim]
+
+            # Assert RoPE returns correct shapes
+            assert (
+                q.shape == (B, T, self.num_heads, self.head_dim)
+            ), f"q must have shape {(B, T, self.num_heads, self.head_dim)}, got {q.shape}"
+            assert (
+                k.shape == (B, T, self.query_groups, self.head_dim)
+            ), f"k must have shape {(B, T, self.query_groups, self.head_dim)}, got {k.shape}"
+            assert (
+                v.shape == (B, T, self.query_groups, self.head_dim)
+            ), f"v must have shape {(B, T, self.query_groups, self.head_dim)}, got {v.shape}"
 
             # Handle KV cache
             if use_cache and kv_cache is not None and layer_idx is not None:
@@ -427,13 +481,10 @@ class Attention(nn.Module):
                     v = torch.cat([cached_v, v], dim=1)
                 # Update cache using only the T most recent tokens
                 kv_cache.update(layer_idx, k[:, -T:], v[:, -T:])
-
-            # Compute heads per group for kv heads -> query heads
-            heads_per_group = self.num_heads // self.query_groups
             
             # Extend KV tensors (if query_groups==1, no expansion is done)
-            k = self._extend_kv_heads(input_tensor=k, heads_per_group=heads_per_group, dim_to_repeat=2)
-            v = self._extend_kv_heads(input_tensor=v, heads_per_group=heads_per_group, dim_to_repeat=2)
+            k = self._extend_kv_heads(kv_tensor=k, heads_per_group=self.heads_per_group, kv_heads_dim=2)
+            v = self._extend_kv_heads(kv_tensor=v, heads_per_group=self.heads_per_group, kv_heads_dim=2)
 
             # FlashAttention 2 - requires CUDA/flash attn available/bf16 or fp16
             if (
@@ -442,8 +493,10 @@ class Attention(nn.Module):
                 and k.dtype in [torch.float16, torch.bfloat16]
                 and v.dtype in [torch.float16, torch.bfloat16]
             ):
-                qkv_packed = torch.stack([q, k, v], dim=3) # [B, T, num_heads, 3, head_dim]
-                qkv_packed = qkv_packed.contiguous()
+                qkv_packed = torch.stack([q, k, v], dim=3).contiguous() # [B, T, num_heads, 3, head_dim]
+                assert (
+                    qkv_packed.is_contiguous()
+                ), "qkv_packed must be contiguous."
 
                 # Handle padding mask for FlashAttention
                 if padding_mask is not None:
@@ -453,36 +506,75 @@ class Attention(nn.Module):
                         )
                     # Ensure padding mask is a boolean tensor
                     padding_mask = padding_mask.bool()
-                    seq_lens = padding_mask.sum(dim=1).int() # [B]
+                    seq_lens = padding_mask.sum(dim=1).int() # [T]
 
                     # Compute cumulative sequence lengths
                     cu_seqlens = torch.cat([
-                        torch.tensor([0],dtype=torch.int32).to(device), # [0]
+                        torch.tensor([0], dtype=torch.int32).to(device), # [0]
                         seq_lens.cumsum(0) # [B]
-                    ], dim=0) # Shape: [B + 1]
+                    ], dim=0) # [B + 1]
+
+                    # Assert cu_seqlens shape/dtype
+                    assert (
+                        cu_seqlens.shape == (B + 1)
+                    ), f"cu_seqlens must have shape {(B + 1)}, got {cu_seqlens.shape}"
+                    assert (
+                        cu_seqlens.dtype == torch.int32
+                    ), f"cu_seqlens must have dtype int32, got {cu_seqlens.dtype}"
 
                     # This is an expected parameter for the FlashAttention function
                     max_seqlen = seq_lens.max().item()
 
                     # Flatten padding mask
                     valid_tokens = padding_mask.flatten() # [B * T]
+                    assert (
+                        valid_tokens.shape == (B * T)
+                    ), f"valid_tokens must have shape {(B * T)} got {valid_tokens.shape}"
 
                     # Index by valid tokens to only get non-padding token positions
-                    qkv_packed = qkv_packed.view(-1, self.num_heads, 3, self.head_dim)[valid_tokens]
+                    qkv_packed = (
+                        qkv_packed.view(-1, self.num_heads, 3, self.head_dim).transpose(1, 2).contiguous()
+                        )[valid_tokens] # [B * T, 3, num_heads, head_dim]
+                    
+                    assert(
+                        qkv_packed == (B * T, 3, self.num_heads, self.head_dim)
+                    ), f"qkv_packed must have shape {(B*T, 3, self.num_heads, self.head_dim)}, got {qkv_packed.shape}"
+                    assert(
+                        qkv_packed.is_contiguous()
+                    ), "qkv_packed must be contiguous"
                 else:
                     # Get cumulative sequence lengths
                     cu_seqlens = torch.arange(
                         0,
-                        (B + 1) * k.size(1),
-                        k.size(1),
+                        (B + 1) * T,
+                        T,
                         dtype=torch.int32,
                     ).to(device) # [B + 1]
-                    max_seqlen = k.size(1)
 
+                    # cu_seqlens dtype/shape check
+                    assert(
+                        cu_seqlens.shape == (B + 1)
+                    ), f"cu_seqlens must have shape {(B + 1)}, got {cu_seqlens.shape}"
+                    assert(
+                        cu_seqlens.dtype == torch.int32
+                    ), f"cu_seqlens must have dtype int32, got {cu_seqlens.dtype}"
+                    
                     # Total tokens is calculated as B * T
-                    total_tokens = B * max_seqlen
+                    total_tokens = B * T
 
-                    qkv_packed = qkv_packed.view(total_tokens, self.num_heads, 3, self.head_dim)
+                    qkv_packed = qkv_packed.view(
+                        total_tokens, 
+                        self.num_heads, 3, 
+                        self.head_dim
+                    ).contiguous().transpose(1, 2)
+
+                    # qkv_packed shape check
+                    assert(
+                        qkv_packed.shape == (total_tokens, 3, self.num_heads, self.head_dim)
+                    ), f"qkv_packed must have shape {(total_tokens, 3, self.num_heads, self.head_dim)}, got {qkv_packed.shape}"
+                    assert(
+                        qkv_packed.is_contiguous()
+                    ), "qkv_packed must be contiguous"
 
                 # Call FlashAttention 2
                 out = flash_attn_varlen_qkvpacked_func(
@@ -493,6 +585,10 @@ class Attention(nn.Module):
                     softmax_scale=1.0 / (self.head_dim ** 0.5),
                     window_size=window_size,
                 ) # [B * T, num_heads, head_dim]
+
+                assert(
+                    out.shape == (B * T, self.num_heads, self.head_dim)
+                ), f"out shape must be {(B * T, self.num_heads, self.head_dim)} got {out.shape}"
 
                 # This is done because the FlashAttention 2 function returns only unpadded tokens
                 if padding_mask is not None:
@@ -511,9 +607,31 @@ class Attention(nn.Module):
 
             # Fallback to PyTorch SPDA if no cuda
             else:
+                warnings.warn(
+                    "Flash Attention 2/SWA not available, falling back to PyTorch SDPA."
+                    )
+                # Reshape q, k, v to [B, num_heads, T, head_dim] (assuming kv_heads get extended)
                 q = q.transpose(1, 2)
                 k = k.transpose(1, 2)
                 v = v.transpose(1, 2)
+
+                assert(
+                    q.shape == (B, self.num_heads, T, self.head_dim)
+                ), f"q must have shape {(B, self.num_heads, T, self.head_dim)}"
+                assert(
+                    k.shape == (B, self.num_heads, T, self.head_dim) or
+                    k.shape == (B, 1, T, self.head_dim)
+                ), (
+                    f"k must have shape {(B, self.num_heads, T, self.head_dim)} "
+                    f"or {(B, 1, T, self.head_dim)} got {k.shape}"
+                )
+                assert(
+                    v.shape == (B, self.num_heads, T, self.head_dim) or
+                    v.shape == (B, 1, T, self.head_dim)
+                ), (
+                    f"v must have shape {(B, self.num_heads, T, self.head_dim)}, "
+                    f"or {(B, 1, T, self.head_dim)} got {k.shape}"
+                )
 
                 # Initialize padding mask
                 attn_mask = None
@@ -527,17 +645,35 @@ class Attention(nn.Module):
                     padding_mask = padding_mask.bool() # Ensure padding mask is a boolean tensor
                     attn_mask = padding_mask.unsqueeze(1).unsqueeze(2) # [B, 1, 1, T]
                     attn_mask = attn_mask.expand(B, 1, T, k.size(2)) # [B, 1, T_q, T_k]
+                    assert(
+                        attn_mask.shape == (B, 1, q.size(2), k.size(2))
+                    ), f"attn_mask must have shape {(B, 1, q.size(2), k.size(2))}, got {attn_mask.shape}"
 
                     # Apply causal masking
                     if causal:
                         # Causal mask shape: [T_q, T_k] where the upper right diagonal portion is False.
                         causal_mask = torch.tril(torch.ones(T, k.size(2), dtype=torch.bool).to(device))
+                        assert(
+                            T == q.size(2)
+                        ), f"T must be equal to {q.size(2)}, got {T} != {q.size(2)}"
+                        assert(
+                            causal_mask.shape == (q.size(2), k.size(2)) # [T_q, T_k]
+                        ), f"causal_mask must have shape {(q.size(2), k.size(2))}, got {causal_mask.shape}"
                         # Since the attention scores tensor has shape [B, num_heads, T_q, T_k]
                         causal_mask = causal_mask.unsqueeze(0).unsqueeze(0) # [1, 1, T_q, T_k]
+                        assert(
+                            attn_mask.dim() == causal_mask.dim()
+                        ), "attn_mask and causal_mask must be of same length for broadcasting."
                         attn_mask = attn_mask & causal_mask # [B, 1, T_q, T_k]
+                        assert(
+                            attn_mask.shape == (B, 1, q.size(2), k.size(2))
+                        ), f"attn_mask must have shape {(B, 1, q.size(2), q.size(2))}, got {attn_mask.shape}"
 
                     # Expand to [B, num_heads, T_q, T_k] only now to avoid unnecessary memory usage.
                     attn_mask = attn_mask.expand(B, self.num_heads, T, k.size(2))
+                    assert(
+                        attn_mask.shape == (B, self.num_heads, q.size(2), k.size(2))
+                    ), f"attn_mask must have shape {(B, self.num_heads, q.size(2), k.size(2))}, got {attn_mask.shape}"
 
                 # Call PyTorch's scaled dot product attention
                 out = F.scaled_dot_product_attention(
@@ -545,15 +681,22 @@ class Attention(nn.Module):
                     attn_mask=attn_mask,
                     is_causal=causal if padding_mask is None else False,
                 ) # [B, num_heads, T, head_dim]
+                assert(
+                    out.shape == (B, self.num_heads, T, self.head_dim)
+                ), f"out must have shape {(B, self.num_heads, T, self.head_dim)}, got {out.shape}"
 
                 # [B, num_heads, T, head_dim] -> [B, T, d_model]
                 out = out.transpose(1, 2).contiguous().view(B, T, D)
+                assert(
+                    out.shape == (B, T, self.d_model)
+                ), f"out must have shape {(B, T, self.d_model)}, got {out.shape}"
 
             # Get cache output for the Attention layer
             cache_out = {'k': k[:, -T:], 'v': v[:, -T:]} if use_cache else None
 
             # Final projection
             return self.w_o(out), cache_out
+
 
 class SwiGLUExpert(nn.Module):  
     """SwiGLU expert layer.
@@ -575,7 +718,7 @@ class SwiGLUExpert(nn.Module):
         """Forward pass of the SwiGLU Expert layer.
 
         Formula:
-            SwiGLU(x) = Dropout(((W1 @ x) * Swish(W3 @ x)) @ W2)
+            SwiGLU(x) = Dropout(Swish((W1 @ x + b1) * (W3 @ x + b3)) @ W2 + b2)
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
@@ -585,6 +728,7 @@ class SwiGLUExpert(nn.Module):
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
             return self.dropout(self.weight2(F.silu(self.weight1(x)) * self.weight3(x)))
+
 
 class TopKRouter(nn.Module):
     """TopK Routing for MoE layer.
@@ -670,6 +814,7 @@ class TopKRouter(nn.Module):
 
         return cv
 
+
 class MoELayer(nn.Module):
     """Mixture of Experts layer.
 
@@ -711,15 +856,14 @@ class MoELayer(nn.Module):
         # Set up RMSNorm
         self.rms_norm = RMSNorm(d_model)
 
-    def forward(self, x: torch.Tensor, padding_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the Mixture of Experts layer.
 
         Args
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
-            padding_mask (torch.Tensor): Padding mask tensor of shape [B, T]. Not used here.
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]. A tensor containing
+            Tuple[torch.Tensor, torch.Tensor]. A tuple containing:
                 - out: Ouput tensor of shape [B, T, d_model].
                 - aux_loss: Auxiliary loss.
         """
@@ -773,6 +917,7 @@ class MoELayer(nn.Module):
         out = out.view(B, T, d_model)
 
         return out, aux_loss
+
 
 class AttentionBlock(nn.Module):
     """Attention block where RMSNorm, Dropout, and residuals are applied.
@@ -835,6 +980,7 @@ class AttentionBlock(nn.Module):
             )
             return x + self.dropout(attn_out), cache_out
 
+
 class MoEBlock(nn.Module):
     """Mixture of Experts block where RMSNorm, Dropout, and residuals are applied.
 
@@ -864,13 +1010,11 @@ class MoEBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        padding_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the MoE Block.
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
-            padding_mask (torch.Tensor): Padding tensor of shape [B, T].
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor]:
@@ -878,8 +1022,9 @@ class MoEBlock(nn.Module):
                 - Auxiliary loss from the MoE layer.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
-            moe_out, aux_loss = self.moe(self.rms_norm(x), padding_mask)
+            moe_out, aux_loss = self.moe(self.rms_norm(x))
             return x + self.dropout(moe_out), aux_loss
+
 
 class TransformerBlock(nn.Module):
     """Transformer block that will be stacked in the final Transformer class.
@@ -946,8 +1091,9 @@ class TransformerBlock(nn.Module):
                 layer_idx=layer_idx,
                 use_cache=use_cache
             )
-            x, aux_loss = self.moe_block(x, padding_mask=padding_mask)
+            x, aux_loss = self.moe_block(x)
             return x, cache_out, aux_loss
+
 
 class Transformer(nn.Module):
     """Complete Transformer class stacking all decoder blocks.
@@ -987,8 +1133,6 @@ class Transformer(nn.Module):
             num_heads=model_args.query_groups,
             head_dim=model_args.d_model // model_args.num_heads,
             num_layers=model_args.num_layers,
-            dtype=dtype,
-            device=device
         )
 
         # Language modeling head, bias=False for weight tying
@@ -1075,8 +1219,26 @@ class Transformer(nn.Module):
             # Ensure input_ids.dtype == torch.int64 for embeddings
             input_ids = input_ids.to(torch.int64)
 
+            # Ensure padding mask/input_ids are the same shape
+            if padding_mask is not None:
+                assert(
+                    input_ids.shape == padding_mask.shape
+                ), "input_ids and padding_mask must have the same shape for correct masking."
+
+            # input_ids dimensions/dtype assertions
+            assert(
+                input_ids.dim() == 2
+            ), f"input_ids must be a 2 dimensional tensor, got {input_ids.dim()}"
+            assert(
+                input_ids.dtype == torch.int64
+            ), f"input_ids dtype must be int64, got {input_ids.dtype}"
+
             # Apply embeddings
             x = self.token_embed(input_ids) # [B, T, d_model]
+
+            assert(
+                x.dim() == 3
+            ), f"x must be a 3 dimensional tensor, got {x.dim()}"
 
             # Final dropout
             x = self.dropout(x)
@@ -1086,6 +1248,10 @@ class Transformer(nn.Module):
 
             # Initialize aux loss as float32 tensor
             total_aux_loss = torch.tensor(0.0, dtype=torch.float32).to(device)
+
+            assert(
+                total_aux_loss.dtype == torch.float32
+            ), f"total_aux_loss dtype must be float32, got {total_aux_loss.dtype}"
 
             # TODO: look into chunked checkpointing for larger memory savings.
             # Stack transformer layers
@@ -1122,6 +1288,9 @@ class Transformer(nn.Module):
             x = self.rms_norm(x)
 
             # Final projection to logits
-            logits = self.lm_head(x)
+            logits = self.lm_head(x) # [B, T, V]
+            assert(
+                logits.dim() == 3
+            ), f"logits must have 3 dimenions, got {logits.dim()}"
 
             return logits, cache_outs, total_aux_loss
