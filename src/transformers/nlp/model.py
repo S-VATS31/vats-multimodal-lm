@@ -3,6 +3,9 @@ from configs.setup_env import (
     dtype, 
     use_flash_attn, 
     flash_attn_varlen_qkvpacked_func,
+    # TODO: integrate xformers swiglu
+    use_xformers_swiglu,
+    swiglu
 )
 
 import math
@@ -338,9 +341,13 @@ class Attention(nn.Module):
         self.heads_per_group = num_heads // query_groups
 
         if d_model % num_heads != 0:
-            raise ValueError(f"d_model ({d_model}) must be divisible by num_heads ({num_heads})")
+            raise ValueError(
+                f"d_model ({d_model}) must be divisible by num_heads ({num_heads})"
+                )
         if num_heads % query_groups != 0:
-            raise ValueError(f"num_heads ({num_heads}) must be divisible by query_groups ({query_groups})")
+            raise ValueError(
+                f"num_heads ({num_heads}) must be divisible by query_groups ({query_groups})"
+                )
 
         # QKV projection matrix
         self.w_qkv = nn.Linear(
@@ -419,6 +426,11 @@ class Attention(nn.Module):
             ValueError if `x` does not have 3 shape [B, T, d_model].
             ValueError if `padding_mask` does not have shape [B, T].
 
+        Requirements for Flash Attention V2:
+            Flash Attention import must be successful.
+            `device` must be cuda.
+            q, k, v tensors must have dtype of float16 or bfloat16.
+
         NOTE: FLASH ATTENTION 2 + SWA HAS NOT BEEN TESTED DUE TO HARDWARE LIMITATIONS.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
@@ -486,6 +498,22 @@ class Attention(nn.Module):
             k = self._extend_kv_heads(kv_tensor=k, heads_per_group=self.heads_per_group, kv_heads_dim=2)
             v = self._extend_kv_heads(kv_tensor=v, heads_per_group=self.heads_per_group, kv_heads_dim=2)
 
+            # Assert extension of kv heads worked or MQA was succesful
+            assert (
+                k.size(2) == self.num_heads or k.size(2) == 1
+            ), f"k.size(2) must be {self.num_heads} or 1, got {k.size(2)}"
+            assert (
+                v.size(2) == self.num_heads or k.size(2) == 1
+            ), f"k.size(2) must be {self.num_heads} or 1, got {k.size(2)}"
+
+            # Assert right window is 0 for causal LM
+            assert (
+                window_size[1] == 0
+            ), (
+                f"right window must be equal to 0, got {window_size[1]} "
+                f"set window_size to (left, 0)"
+            )
+
             # FlashAttention 2 - requires CUDA/flash attn available/bf16 or fp16
             if (
                 use_flash_attn  and device.type == "cuda"
@@ -506,12 +534,23 @@ class Attention(nn.Module):
                         )
                     # Ensure padding mask is a boolean tensor
                     padding_mask = padding_mask.bool()
-                    seq_lens = padding_mask.sum(dim=1).int() # [T]
+                    assert(
+                        padding_mask.dtype == torch.bool
+                    ), f"padding_mask must be boolean tensor, got {padding_mask.dtype}"
+
+                    # Get sequence lengths
+                    seqlens = padding_mask.sum(dim=1).int() # [B]
+                    assert (
+                        len(seqlens) == B
+                    ), f"len(seqlens) must be equal to B, got {len(seqlens)} != {B}"
+
+                    # Get maximum sequence length
+                    max_seqlen = seqlens.max().item()
 
                     # Compute cumulative sequence lengths
                     cu_seqlens = torch.cat([
                         torch.tensor([0], dtype=torch.int32).to(device), # [0]
-                        seq_lens.cumsum(0) # [B]
+                        seqlens.cumsum(0) # [B]
                     ], dim=0) # [B + 1]
 
                     # Assert cu_seqlens shape/dtype
@@ -522,9 +561,6 @@ class Attention(nn.Module):
                         cu_seqlens.dtype == torch.int32
                     ), f"cu_seqlens must have dtype int32, got {cu_seqlens.dtype}"
 
-                    # This is an expected parameter for the FlashAttention function
-                    max_seqlen = seq_lens.max().item()
-
                     # Flatten padding mask
                     valid_tokens = padding_mask.flatten() # [B * T]
                     assert (
@@ -533,11 +569,13 @@ class Attention(nn.Module):
 
                     # Index by valid tokens to only get non-padding token positions
                     qkv_packed = (
-                        qkv_packed.view(-1, self.num_heads, 3, self.head_dim).transpose(1, 2).contiguous()
+                        qkv_packed.view(-1, self.num_heads, 3, self.head_dim)
+                        .transpose(1, 2)
+                        .contiguous()
                         )[valid_tokens] # [B * T, 3, num_heads, head_dim]
                     
                     assert(
-                        qkv_packed == (B * T, 3, self.num_heads, self.head_dim)
+                        qkv_packed.shape == (B * T, 3, self.num_heads, self.head_dim)
                     ), f"qkv_packed must have shape {(B*T, 3, self.num_heads, self.head_dim)}, got {qkv_packed.shape}"
                     assert(
                         qkv_packed.is_contiguous()
@@ -551,6 +589,10 @@ class Attention(nn.Module):
                         dtype=torch.int32,
                     ).to(device) # [B + 1]
 
+                    # Get maximum sequence length
+                    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+                    max_seqlen = seqlens.max().item()
+
                     # cu_seqlens dtype/shape check
                     assert(
                         cu_seqlens.shape == (B + 1)
@@ -558,20 +600,17 @@ class Attention(nn.Module):
                     assert(
                         cu_seqlens.dtype == torch.int32
                     ), f"cu_seqlens must have dtype int32, got {cu_seqlens.dtype}"
-                    
-                    # Total tokens is calculated as B * T
-                    total_tokens = B * T
 
-                    qkv_packed = qkv_packed.view(
-                        total_tokens, 
-                        self.num_heads, 3, 
-                        self.head_dim
-                    ).contiguous().transpose(1, 2)
+                    qkv_packed = (
+                        qkv_packed.view(-1, self.num_heads, 3, self.head_dim)
+                        .contiguous()
+                        .transpose(1, 2)
+                    ) # [B * T, 3, num_heads, head_dim]
 
                     # qkv_packed shape check
                     assert(
-                        qkv_packed.shape == (total_tokens, 3, self.num_heads, self.head_dim)
-                    ), f"qkv_packed must have shape {(total_tokens, 3, self.num_heads, self.head_dim)}, got {qkv_packed.shape}"
+                        qkv_packed.shape == (B * T, 3, self.num_heads, self.head_dim)
+                    ), f"qkv_packed must have shape {(B * T, 3, self.num_heads, self.head_dim)}, got {qkv_packed.shape}"
                     assert(
                         qkv_packed.is_contiguous()
                     ), "qkv_packed must be contiguous"
@@ -582,7 +621,7 @@ class Attention(nn.Module):
                     cu_seqlens,
                     max_seqlen,
                     causal=causal,
-                    softmax_scale=1.0 / (self.head_dim ** 0.5),
+                    softmax_scale=1.0 / (math.sqrt(self.head_dim)),
                     window_size=window_size,
                 ) # [B * T, num_heads, head_dim]
 
@@ -697,6 +736,8 @@ class Attention(nn.Module):
             # Final projection
             return self.w_o(out), cache_out
 
+# TODO: Add xformers SwiGLU
+# TODO: add assertions to all MoE components
 
 class SwiGLUExpert(nn.Module):  
     """SwiGLU expert layer.
@@ -810,7 +851,7 @@ class TopKRouter(nn.Module):
         experts_fractions = experts / experts.sum()
 
         # Compute coefficient of variation
-        cv = torch.std(experts_fractions) / torch.mean(experts_fractions)
+        cv = experts_fractions.std(unbiased=False) / experts_fractions.mean()
 
         return cv
 
