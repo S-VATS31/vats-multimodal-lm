@@ -792,12 +792,15 @@ class SwiGLUExpert(nn.Module):
             due to a shape error).
             - When we call SwiGLU, all the `None`s being passed, are `Optional[torch.Tensor]`s
             representing bias.
+            - Requires a contiguous tensor, so we use .contiguous() on the input tensor.
 
         Requirements:
             xformers swiglu() import must be succesful.
             `device` must be cuda.
             x must live on `device` of cuda.
             x must have dtype of float16 or bfloat16.
+
+        NOTE: OPTIMIZED SWIGLU HAS NOT BEEN TESTED DUE TO HARDWARE REQUIREMENTS.
         """
         # xformers swiglu
         if (
