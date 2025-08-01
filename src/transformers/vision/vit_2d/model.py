@@ -3,7 +3,6 @@ from configs.setup_env import (
     dtype,
     use_flash_attn,
     flash_attn_varlen_qkvpacked_func,
-    # TODO: integrate these into FFN
     use_xformers_swiglu,
     swiglu
 )
@@ -36,6 +35,8 @@ class PatchEmbeddings(nn.Module):
             raise ValueError("img_size must be divisible by patch_size")
         self.img_size = img_size
         self.patch_size = patch_size
+        self.num_patches = (img_size // patch_size) ** 2
+        self.d_model = d_model
 
         # Patch projection
         self.proj = nn.Conv2d(C_in, d_model, kernel_size=patch_size, stride=patch_size)
@@ -47,18 +48,33 @@ class PatchEmbeddings(nn.Module):
             x (torch.Tensor): [B, C, H, W] input image tensor.
 
         Returns:
-            torch.Tensor: [B, num_patches, d_model]
+            torch.Tensor: [B, num_patches, d_model].
         """
         with autocast(device_type=device.type, dtype=dtype):
-            # Get batch size, height, and width
+            assert (
+                x.dim() == 4
+            ), f"x must have 4 dimensions, got {x.dim()} dimensions"
+
+            # Get height/width of image
             B, _, H, W = x.shape
             if H != self.img_size or W != self.img_size:
                 raise ValueError(f"Expected input of size {self.img_size}x{self.img_size}, got {H}x{W}")
             
             # Project patches
             x = self.proj(x) # [B, d_model, H/P, W/P]
+            assert (
+                x.shape == (B, self.d_model, H / self.patch_size, W / self.patch_size)
+            ), f"x must have shape of {(B, self.d_model, H / self.patch_size, W / self.patch_size)}, got {x.shape}"
+
             x = x.flatten(2) # [B, d_model, num_patches]
+            assert (
+                x.shape == (B, self.d_model, self.num_patches)
+            ), f"x must have shape of {(B, self.d_model, self.num_patches)}, got {x.shape}"
+
             x = x.transpose(1, 2) # [B, num_patches, d_model]
+            assert (
+                x.shape == (B, self.num_patches, self.d_model)
+            ), f"x must have shape of {(B, self.num_patches, self.d_model)}, got {x.shape}"
 
         return x
 
@@ -74,6 +90,7 @@ class RMSNorm(nn.Module):
         super().__init__()
 
         self.eps = eps
+        self.d_model = d_model
         self.gamma = nn.Parameter(torch.ones(d_model)) # Scaling factor
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -86,6 +103,12 @@ class RMSNorm(nn.Module):
             torch.Tensor: Normalized output tensor with same shape.
         """
         with autocast(device_type=device.type, dtype=dtype):
+            assert (
+                x.dim() == 3
+            ), f"x must have 3 dimensions, got {x.dim()} dimensions."
+            assert (
+                x.size(-1) == self.d_model
+            ), f"x last dimension must be {self.d_model}, got {x.size(-1)}"
             return self.gamma * (
                 x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
             )
@@ -103,23 +126,37 @@ class RoPE(nn.Module):
     Raises:
         ValueError if `head_dim % 4 != 0`
     """
-    def __init__(self, head_dim: int, img_size: int, patch_size: int, base: float = 10000.0):
+    def __init__(
+        self, 
+        head_dim: int, 
+        img_size: int, 
+        patch_size: int, 
+        base: float
+    ):
         super().__init__()
 
         # Ensure head_dim is divisible by 4 for 2D RoPE
         if head_dim % 4 != 0:
-            raise ValueError(f"head_dim must be divisible by 4 for 2D RoPE, head_dim: {head_dim}")
+            raise ValueError(
+                f"head_dim must be divisible by 4 for 2D RoPE, head_dim: {head_dim}"
+                )
+        
         self.head_dim = head_dim
         self.img_size = img_size
         self.patch_size = patch_size
         self.grid_size = img_size // patch_size
+        self.num_patches = (img_size // patch_size) ** 2
 
         # Calculate inverse frequency for both x and y dimensions
         freq_dim = head_dim // 4
         inv_freq = 1.0 / (base ** (torch.arange(0, freq_dim, dtype=torch.float32) / freq_dim))
+        assert (
+            inv_freq.dtype == torch.float32
+        ), f"inv_freq must have dtype of torch.float32, got {inv_freq.dtype}"
+
         self.register_buffer("inv_freq", inv_freq)
 
-    def compute_sine_cosine(
+    def _compute_sine_cosine(
         self,
         grid_size: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -138,27 +175,55 @@ class RoPE(nn.Module):
         if grid_size is None:
             grid_size = self.grid_size
 
+        assert (
+            grid_size is not None
+        ), f"grid_size cannot be None at this point."
+
         # Create 2D position grid
         pos_x = torch.arange(grid_size, dtype=self.inv_freq.dtype, device=self.inv_freq.device)
         pos_y = torch.arange(grid_size, dtype=self.inv_freq.dtype, device=self.inv_freq.device)
 
         # Create meshgrid and flatten
         grid_x, grid_y = torch.meshgrid(pos_x, pos_y, indexing="ij")
-        pos_x_flat = grid_x.flatten().unsqueeze(1) # [num_patches, 1]
-        pos_y_flat = grid_y.flatten().unsqueeze(1) # [num_patches, 1]
+
+        # Add singleton dimension for broadcasting
+        pos_x_flat = grid_x.flatten()[:, None] # [num_patches, 1]
+        pos_y_flat = grid_y.flatten()[:, None] # [num_patches, 1]
+
+        assert (
+            pos_x_flat.shape == (self.num_patches, 1)
+        ), f"pos_x_flat must have shape of {(self.num_patches, 1)}, got {pos_x_flat.shape}"
+        assert (
+            pos_y_flat.shape == (self.num_patches, 1)
+        ), f"pos_y_flat must have shape of {(self.num_patches, 1)}, got {pos_y_flat.shape}"
 
         # Compute rotation angles for x and y
+        # rotation angles = positions * inverse frequency
         theta_x = pos_x_flat * self.inv_freq # [num_patches, head_dim//4]
         theta_y = pos_y_flat * self.inv_freq # [num_patches, head_dim//4]
 
-        # Unsqueeze to match q, k vectors number of dimensions
-        sin_x = torch.sin(theta_x).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
-        cos_x = torch.cos(theta_x).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
-        sin_y = torch.sin(theta_y).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
-        cos_y = torch.cos(theta_y).unsqueeze(0).unsqueeze(0) # [1, 1, num_patches, head_dim//4]
+        assert (
+            theta_x.shape == (self.num_patches, self.head_dim // 4)
+        ), f"theta_x must have shape of {(self.num_patches, self.head_dim // 4)}, got {theta_x.shape}"
+        assert (
+            theta_y.shape == (self.num_patches, self.head_dim // 4)
+        ), f"theta_y must must shape of {(self.num_patches, self.head_dim // 4)}, got {theta_y.shape}"
+
+        # Add singleton dimension to match q, k vectors number of dimensions
+        sin_x = torch.sin(theta_x)[None, None] # [1, 1, num_patches, head_dim//4]
+        cos_x = torch.cos(theta_x)[None, None] # [1, 1, num_patches, head_dim//4]
+        sin_y = torch.sin(theta_y)[None, None] # [1, 1, num_patches, head_dim//4]
+        cos_y = torch.cos(theta_y)[None, None] # [1, 1, num_patches, head_dim//4]
+        assert (
+            sin_x.dim() == 4 and
+            cos_x.dim() == 4 and
+            sin_y.dim() == 4 and
+            cos_y.dim() == 4
+        ), f"sin_x, cos_x, sin_y, cos_y all must have 4 dimensions."
+
         return sin_x, cos_x, sin_y, cos_y
 
-    def create_rotary(
+    def _create_rotary(
         self,
         x: torch.Tensor,
         sin_x: torch.Tensor,
@@ -213,20 +278,21 @@ class RoPE(nn.Module):
         Returns:
             torch.Tensor: Tensor with applied 2D rotary positional embeddings of shape: [B, num_heads, T, head_dim].
         """
+        assert (
+            x.dim() == 4
+        ), f"x must have 4 dimensions, got {x.dim()} dimensions."
         T = x.size(2)
         
-        # Transpose to [B, T, num_heads, head_dim] for processing
-        x_transposed = x.transpose(1, 2) # [B, T, num_heads, head_dim]
-
         # Calculate grid size from number of patches
         grid_size = int(math.sqrt(T))
-        sin_x, cos_x, sin_y, cos_y = self.compute_sine_cosine(grid_size)
+        sin_x, cos_x, sin_y, cos_y = self._compute_sine_cosine(grid_size)
 
         # Apply RoPE
-        x_final = self.create_rotary(x_transposed, sin_x, cos_x, sin_y, cos_y)
+        # We want q, k shapes of [B, T, num_heads, head_dim] so transpose(1, 2)
+        x = self._create_rotary(x.transpose(1, 2), sin_x, cos_x, sin_y, cos_y)
 
         # Transpose back to [B, num_heads, T, head_dim]
-        return x_final.transpose(1, 2)
+        return x.transpose(1, 2)
 
 
 class GroupedQueryAttention(nn.Module):
@@ -237,10 +303,6 @@ class GroupedQueryAttention(nn.Module):
         num_heads (int): Number of attention heads for queries.
         query_groups (int): Number of key/value groups (heads).
         rope_module (RoPE): An instance of the RoPE module for applying rotary embeddings.
-        attn_method (str): Attention method.
-            `flash-attn` for GQA + Flash Attention 2 + SWA + GQA.
-            `torch-spda` for PyTorch's scaled dot product attention + GQA.
-            `manual`     for manual integration of GQA.
 
     Raises:
         ValueError: If `d_model` is not divisible by `num_heads`.
@@ -252,7 +314,6 @@ class GroupedQueryAttention(nn.Module):
         num_heads: int, 
         query_groups: int, 
         rope_module: RoPE,
-        attn_method: str = "torch-sdpa",
     ):
         super().__init__()
 
@@ -269,7 +330,6 @@ class GroupedQueryAttention(nn.Module):
         self.num_heads = num_heads
         self.query_groups = query_groups
         self.head_dim = d_model // num_heads
-        self.attn_method = attn_method
         self.heads_per_group = num_heads // query_groups
 
         # QKV projection
@@ -291,7 +351,7 @@ class GroupedQueryAttention(nn.Module):
         # Initialize 2D RoPE
         self.rope_module = rope_module
 
-    def _expand(
+    def _expand_query_groups(
         self, 
         input_tensor: torch.Tensor, 
         heads_per_group: int, 
@@ -334,23 +394,41 @@ class GroupedQueryAttention(nn.Module):
             ValueError: If `D` is not equal to `d_model`.
             ValueError: If `q.shape[-1]` is not equal to `k.shape[-1]`.
             ValueError: If `softmax_attn.shape[-1]` is not equal to `v.shape[-2]`.
+
+        Requirements for Flash Attention V2:
+            Flash Attention import must be succesful.
+            `device` must be cuda.
+            q, k, v must have dtype of float16 or bfloat16.
         """
         with autocast(device_type=device.type, dtype=dtype):
             if x.dim() != 3:
                 raise ValueError(f"Input tensor, x, must have 3 dimensions, got: {x.dim()} dimensions")
-            B, T, D = x.shape
-            if D != self.d_model:
-                raise ValueError(f"D ({D}) must be equal to d_model ({self.d_model}).")
+            B, T, _ = x.shape
             
             # Chunked projection matrix
             qkv = self.w_qkv(x) # [B, T, num_heads * head_dim + 2 * query_groups * head_dim]
+            assert (
+
+            )
 
             # q: [B, T, num_head * head_dim]
             # kv: [B, T, 2 * query_groups * head_dim]
             q, kv = torch.split(qkv, [self.num_heads * self.head_dim, 2 * self.query_groups * self.head_dim], dim=-1)
+            assert (
+
+            )
+            assert(
+
+            )
 
             # k, v shape: [B, T, query_groups * head_dim]
             k, v = torch.chunk(kv, chunks=2, dim=-1)
+            assert (
+
+            )
+            assert(
+
+            )
             
             # Reshape into 4D tensors for RoPE
             # q shape: [B, num_heads, T, head_dim]
@@ -359,37 +437,91 @@ class GroupedQueryAttention(nn.Module):
             k = k.view(B, T, self.query_groups, self.head_dim).transpose(1, 2)
             v = v.view(B, T, self.query_groups, self.head_dim).transpose(1, 2)
 
+            assert (
+
+            )
+            assert (
+
+            )
+            assert (
+
+            )
+
             # Apply RoPE to q and k using the new method that handles the correct tensor shapes
             q = self.rope_module(q) # [B, num_heads, T, head_dim]
             k = self.rope_module(k) # [B, query_groups, T, head_dim]
 
+            assert (
+
+            )
+            assert (
+
+            )
+
             # Expand kv heads to num heads for GQA
-            k_expanded = self._expand(k, self.heads_per_group, dim_to_repeat=1)
-            v_expanded = self._expand(v, self.heads_per_group, dim_to_repeat=1)
+            k_expanded = self._expand_query_groups(k, self.heads_per_group, dim_to_repeat=1)
+            v_expanded = self._expand_query_groups(v, self.heads_per_group, dim_to_repeat=1)
+
+            assert (
+
+            )
+            assert (
+
+            )
 
             # Flash Attention 2 + GQA + SWA
             if (
-                self.attn_method == "flash-attn" and use_flash_attn and device.type == "cuda"
+                use_flash_attn 
+                and device.type == "cuda"
                 and q.dtype in [torch.float16, torch.bfloat16]
                 and k_expanded.dtype in [torch.float16, torch.bfloat16]
                 and v_expanded.dtype in [torch.float16, torch.bfloat16]
             ):
                 # Stack tensors along the 3rd dimension
                 qkv_packed = (
-                    torch.stack([q, k_expanded, v_expanded], dim=3).transpose(1, 2).contiguous()
+                    torch.stack([q, k_expanded, v_expanded], dim=3)
+                    .transpose(1, 2)
+                    .contiguous()
                     ) # [B, T, num_heads, 3, head_dim]
+                
+                assert (
+
+                )
+                assert (
+
+                )
                 
                 # Cumulative sequence lengths for all T
                 cu_seqlens = torch.arange(0, (B + 1) * T, step=T, dtype=torch.int32).to(device)
+                assert (
+
+                )
+                assert (
+
+                )
 
                 # Get maximum sequence length
                 seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
                 max_seqlen = seqlens.max().item()
 
+                assert (
+                    
+                )
+
                 total_patches = B * T
 
                 # Flatten QKV
-                qkv_flattened = qkv_packed.view(total_patches, self.num_heads, 3, self.head_dim)
+                qkv_flattened = (
+                    qkv_packed.view(total_patches, self.num_heads, 3, self.head_dim)
+                    .transpose(1, 2)
+                    .contiguous()
+                )
+                assert (
+
+                )
+                assert (
+
+                )
 
                 # Compute attention output
                 attn_out = flash_attn_varlen_qkvpacked_func(
@@ -397,43 +529,37 @@ class GroupedQueryAttention(nn.Module):
                     cu_seqlens,
                     max_seqlen,
                     causal=False,
-                    softmax_scale=1.0 / (self.head_dim ** 0.5),
+                    softmax_scale=1.0 / (math.sqrt(self.head_dim)),
                     window_size=window_size,
                 ) # [B * T, num_heads, head_dim]
 
-                # Reshape to [B, T, num_heads, head_dim]
-                attn_out = attn_out.contiguous().view(B, T, self.num_heads, self.head_dim)
+                assert (
 
-            # Manual integration of GQA
-            elif self.attn_method == "manual":
-                if q.shape[-1] != k_expanded.shape[-1]:
-                    raise ValueError(
-                        f"q.shape[-1] ({q.shape[-1]}) must be equal to k_expanded.shape[-1] ({k_expanded.shape[-1]}) for matrix multiplication."
-                    )
-                # Compute attention scores
-                attn = torch.matmul(q, k_expanded.transpose(-2, -1)) # [B, num_heads, T, T]
-                scaled_attn = attn / math.sqrt(self.head_dim)
-                softmax_attn = F.softmax(scaled_attn, dim=-1)
-                # Compute attention output
-                if softmax_attn.shape[-1] != v_expanded.shape[-2]:
-                    raise ValueError(
-                        f"softmax_attn.shape[-1] ({softmax_attn.shape[-1]}) must be equal to v_expanded.shape[-2] ({v_expanded.shape[-2]}) for matrix multiplication"
-                    )
-                attn_out = torch.matmul(softmax_attn, v_expanded)
+                )
+
+                # Reshape output to [B, T, d_model]
+                attn_out = attn_out.contiguous().view(B, T, self.d_model)
+                assert (
+
+                )
 
             # PyTorch SDPA (leverages Flash Attention if available)
-            elif self.attn_method == "torch-sdpa":
+            else:
                 attn_out = F.scaled_dot_product_attention(
                     q, k_expanded, v_expanded,
                     is_causal=False,
                 ) # [B, num_heads, T, head_dim]
 
-            # Invalid attention method
-            else:
-                raise ValueError(f"Expected 'flash-attn', 'torch-sdpa', or 'manual', got {self.attn_method}")
+                assert (
 
-            # Concatenate heads
-            attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, D) # [B, T, d_model]
+                )
+                
+                # Reshape output to [B, T, d_model]
+                attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, self.d_model)
+                assert (
+                    
+                )
+
             return self.w_o(attn_out)
 
 
@@ -446,7 +572,14 @@ class GQABlock(nn.Module):
         query_groups (int): Number of key/value groups (heads).
         rope_module (RoPE): An instance of the RoPE module for applying rotary embeddings.
     """
-    def __init__(self, d_model: int, num_heads: int, query_groups: int, rope_module: RoPE, dropout: float = 0.15):
+    def __init__(
+        self, 
+        d_model: int, 
+        num_heads: int, 
+        query_groups: int, 
+        rope_module: RoPE, 
+        dropout: float = 0.15
+    ):
         super().__init__()
 
         self.rms_norm = RMSNorm(d_model)
@@ -472,15 +605,58 @@ class FFN(nn.Module):
     Args:
         d_model (int): Input and output dimension.
         d_ffn (int): Hidden dimension (usually 4 * d_model).
-        dropout (float): Dropout rate.
+        dropout (float): Dropout probability.
     """
     def __init__(self, d_model: int, d_ffn: int, dropout: float = 0.15):
         super().__init__()
 
-        self.linear1 = nn.Linear(d_model, d_ffn)
-        self.linear2 = nn.Linear(d_ffn, d_model)
-        self.linear3 = nn.Linear(d_model, d_ffn)
+        self.linear1 = nn.Linear(d_model, d_ffn, bias=False)
+        self.linear2 = nn.Linear(d_model, d_ffn, bias=False)
+        self.linear3 = nn.Linear(d_ffn, d_model, bias=False) # Output projection
         self.dropout = nn.Dropout(p=dropout)
+
+    def _optimized_swiglu(self, x: torch.Tensor) -> torch.Tensor:
+        """Optimized SwiGLU activation with the help of xformers.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, T, d_model].
+
+        Returns:
+            torch.Tensor: Output tensor of same shape.
+
+        Requirements:
+
+        """
+        # xformers SwiGLU
+        if (
+            use_xformers_swiglu
+            and device.type == "cuda"
+            and x.dtype in [torch.float16, torch.bfloat16]
+            and x.is_cuda  
+        ):
+            return (
+                self.dropout(swiglu(
+                    x.contiguous(),
+                    self.linear1.weight.T, None,
+                    self.linear2.weight.T, None,
+                    self.linear3.weight.T, None
+                ))
+            )
+        # PyTorch SwiGLU
+        else:
+            warnings.warn("xformers SwiGLU not available, falling back to PyTorch SwiGLU.")
+            return self._pytorch_swiglu(x)
+        
+    def _pytorch_swiglu(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch implementation of SwiGLU, fallback for xformers SwiGLU.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, T, d_model].
+        
+        Returns:
+            torch.Tensor: Output tensor of same shape.
+        """
+        return self.dropout(self.linear3(F.silu(self.linear1(x)) * self.linear2(x)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Perform forward pass through FFN.
@@ -489,11 +665,10 @@ class FFN(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
 
         Returns:
-            torch.Tensor: Output tensor of shape [B, T, d_model].
+            torch.Tensor: Output tensor of same shape.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return self.dropout(self.linear2(F.silu(self.linear1(x)) * self.linear3(x)))
-
+            return self._optimized_swiglu(x)
 
 class FFNBlock(nn.Module):
     """FFN block which applies RMSNorm, Dropout, and a pass through the FFN.
@@ -665,11 +840,11 @@ class VisionTransformer(nn.Module):
 def main():
     model_args = ModelArgs()
     model = VisionTransformer(model_args).to(device)
-    B, C, H, W = 16, 3, 384, 384
+    B, C, H, W = 2, 3, 384, 384
     x = torch.randn(B, C, H, W).to(device)
     logits = model(x)
     return logits
 
 if __name__ == "__main__":
     logits = main()
-    print(logits.shape) # [16, 1000]
+    print(logits.shape) # torch.Size([2, 1000])
