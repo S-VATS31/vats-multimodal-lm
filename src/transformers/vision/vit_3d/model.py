@@ -739,11 +739,12 @@ class GatedFFN(nn.Module):
         Returns:
             torch.Tensor: Output tensor of same shape.
         """
-        assert(
-            x.dim() == 3
-        ), f"x must be a 3 dimensional tensor, got {x.dim()} dimensions"
+        with autocast(device_type=device.type, dtype=dtype):
+            assert(
+                x.dim() == 3
+            ), f"x must be a 3 dimensional tensor, got {x.dim()} dimensions"
 
-        return self._optimized_swiglu(x)
+            return self._optimized_swiglu(x)
 
 class AttentionBlock(nn.Module):
     """Attention block with attention, normalization, dropout, and residuals applied.
@@ -1077,15 +1078,3 @@ class VideoTransformer(nn.Module):
         ), f"logits must be a 2 dimensional tensor, got {logits.dim()} dimensions"
 
         return logits # [B, num_classes]
-
-def main():
-    model_args = ModelArgs()
-    model = VideoTransformer(model_args).to(device)
-    B, C, T, H, W = 4, 3, 8, 32, 32
-    x = torch.randn(B, C, T, H, W).to(device)
-    logits = model(x)
-    return logits
-
-if __name__ == "__main__":
-    logits = main()
-    print(logits.shape) # torch.Size([4, 1000])
