@@ -3,7 +3,6 @@ from configs.setup_env import (
     dtype, 
     use_flash_attn, 
     flash_attn_varlen_qkvpacked_func,
-    # TODO: integrate xformers swiglu
     use_xformers_swiglu,
     swiglu
 )
@@ -40,7 +39,7 @@ class RoPE(nn.Module):
         # inv_freq = 1 / (theta ^ (2i/d)) where d = head_dim
         # We set dtype=float32 to maintain numerical stability when exponentiating
         inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)).to(device)
-        assert(
+        assert (
             inv_freq.dtype == torch.float32
         ), f"inv_freq must have dtype of float32, got {inv_freq.dtype}"
         self.register_buffer("inv_freq", inv_freq)
@@ -71,10 +70,10 @@ class RoPE(nn.Module):
             cos_freqs = self.cos_cache[:seq_len] # [T, head_dim // 2]
             sin_freqs = self.sin_cache[:seq_len] # [T, head_dim // 2]
 
-            assert(
+            assert (
                 cos_freqs.shape == (seq_len, self.head_dim // 2)
             ), f"cos_freqs must have shape {(seq_len, self.head_dim //2)} got {cos_freqs.shape}"
-            assert(
+            assert (
                 sin_freqs.shape == (seq_len, self.head_dim // 2)
             ), f"sin_freqs must have shape {(seq_len, self.head_dim //2)} got {sin_freqs.shape}"
 
@@ -331,7 +330,13 @@ class Attention(nn.Module):
         query_groups (int): Number of query groups that partition the queries into subsets.
         theta (float): Exponential base of the inverse frequency.
     """
-    def __init__(self, d_model: int, num_heads: int, query_groups: int, theta: float):
+    def __init__(
+        self, 
+        d_model: int, 
+        num_heads: int, 
+        query_groups: int, 
+        theta: float
+    ):
         super().__init__()
 
         self.d_model = d_model
@@ -443,14 +448,32 @@ class Attention(nn.Module):
 
             # Project QKV
             qkv = self.w_qkv(x) # [B, T, num_heads * head_dim + 2 * query_groups * head_dim]
+            assert (
+                qkv.shape == (B, T, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim)
+            ), (
+                f"qkv must have shape of {(B, T, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim)} "
+                f"got, {qkv.shape}"
+            )
 
             # q shape: [B, T, num_heads * head_dim]
             # kv shape: [B, T, 2 * query_groups * head_dim]
             q, kv = torch.split(qkv, [self.num_heads * self.head_dim, 2 * self.query_groups * self.head_dim], dim=-1)
+            assert (
+                q.shape == (B, T, self.num_heads * self.head_dim)
+            ), f"q must have shape of {(B, T, self.num_heads * self.head_dim)}, got {q.shape}"
+            assert (
+                kv.shape == (B, T, 2 * self.query_groups * self.head_dim)
+            ), f"kv must have shape of {(B, T, 2 * self.query_groups * self.head_dim)}, got {kv.shape}"
 
             # k shape: [B, T, query_groups * head_dim]
             # v shape: [B, T, query_groups * head_dim]
             k, v = torch.chunk(kv, 2, dim=-1)
+            assert (
+                k.shape == (B, T, self.query_groups * self.head_dim)
+            ), f"k must have shape of {(B, T, self.query_groups * self.head_dim)}, got {k.shape}"
+            assert (
+                v.shape == (B, T, self.query_groups * self.head_dim)
+            ), f"v must have shape of {(B, T, self.query_groups * self.head_dim)}, got {v.shape}"
 
             # Assertions before reshaping
             assert (
@@ -472,7 +495,6 @@ class Attention(nn.Module):
             q = self.rope(q) # [B, T, num_heads, head_dim]
             k = self.rope(k) # [B, T, query_groups, head_dim]
 
-            # Assert RoPE returns correct shapes
             assert (
                 q.shape == (B, T, self.num_heads, self.head_dim)
             ), f"q must have shape {(B, T, self.num_heads, self.head_dim)}, got {q.shape}"
@@ -510,7 +532,7 @@ class Attention(nn.Module):
             assert (
                 window_size[1] == 0
             ), (
-                f"right window must be equal to 0, got {window_size[1]} "
+                f"right window must be equal to 0, got {window_size[1]}. "
                 f"set window_size to (left, 0)"
             )
 
@@ -534,7 +556,7 @@ class Attention(nn.Module):
                         )
                     # Ensure padding mask is a boolean tensor
                     padding_mask = padding_mask.bool()
-                    assert(
+                    assert (
                         padding_mask.dtype == torch.bool
                     ), f"padding_mask must be boolean tensor, got {padding_mask.dtype}"
 
@@ -574,10 +596,10 @@ class Attention(nn.Module):
                         .contiguous()
                         )[valid_tokens] # [B * T, 3, num_heads, head_dim]
                     
-                    assert(
+                    assert (
                         qkv_packed.shape == (B * T, 3, self.num_heads, self.head_dim)
                     ), f"qkv_packed must have shape {(B*T, 3, self.num_heads, self.head_dim)}, got {qkv_packed.shape}"
-                    assert(
+                    assert (
                         qkv_packed.is_contiguous()
                     ), "qkv_packed must be contiguous"
                 else:
@@ -594,10 +616,10 @@ class Attention(nn.Module):
                     max_seqlen = seqlens.max().item()
 
                     # cu_seqlens dtype/shape check
-                    assert(
+                    assert (
                         cu_seqlens.shape == (B + 1)
                     ), f"cu_seqlens must have shape {(B + 1)}, got {cu_seqlens.shape}"
-                    assert(
+                    assert (
                         cu_seqlens.dtype == torch.int32
                     ), f"cu_seqlens must have dtype int32, got {cu_seqlens.dtype}"
 
@@ -608,10 +630,10 @@ class Attention(nn.Module):
                     ) # [B * T, 3, num_heads, head_dim]
 
                     # qkv_packed shape check
-                    assert(
+                    assert (
                         qkv_packed.shape == (B * T, 3, self.num_heads, self.head_dim)
                     ), f"qkv_packed must have shape {(B * T, 3, self.num_heads, self.head_dim)}, got {qkv_packed.shape}"
-                    assert(
+                    assert (
                         qkv_packed.is_contiguous()
                     ), "qkv_packed must be contiguous"
 
@@ -625,7 +647,7 @@ class Attention(nn.Module):
                     window_size=window_size,
                 ) # [B * T, num_heads, head_dim]
 
-                assert(
+                assert (
                     out.shape == (B * T, self.num_heads, self.head_dim)
                 ), f"out shape must be {(B * T, self.num_heads, self.head_dim)} got {out.shape}"
 
@@ -654,17 +676,17 @@ class Attention(nn.Module):
                 k = k.transpose(1, 2)
                 v = v.transpose(1, 2)
 
-                assert(
+                assert (
                     q.shape == (B, self.num_heads, T, self.head_dim)
                 ), f"q must have shape {(B, self.num_heads, T, self.head_dim)}"
-                assert(
+                assert (
                     k.shape == (B, self.num_heads, T, self.head_dim) or
                     k.shape == (B, 1, T, self.head_dim)
                 ), (
                     f"k must have shape {(B, self.num_heads, T, self.head_dim)} "
                     f"or {(B, 1, T, self.head_dim)} got {k.shape}"
                 )
-                assert(
+                assert (
                     v.shape == (B, self.num_heads, T, self.head_dim) or
                     v.shape == (B, 1, T, self.head_dim)
                 ), (
@@ -684,7 +706,7 @@ class Attention(nn.Module):
                     padding_mask = padding_mask.bool() # Ensure padding mask is a boolean tensor
                     attn_mask = padding_mask.unsqueeze(1).unsqueeze(2) # [B, 1, 1, T]
                     attn_mask = attn_mask.expand(B, 1, T, k.size(2)) # [B, 1, T_q, T_k]
-                    assert(
+                    assert (
                         attn_mask.shape == (B, 1, q.size(2), k.size(2))
                     ), f"attn_mask must have shape {(B, 1, q.size(2), k.size(2))}, got {attn_mask.shape}"
 
@@ -692,25 +714,25 @@ class Attention(nn.Module):
                     if causal:
                         # Causal mask shape: [T_q, T_k] where the upper right diagonal portion is False.
                         causal_mask = torch.tril(torch.ones(T, k.size(2), dtype=torch.bool).to(device))
-                        assert(
+                        assert (
                             T == q.size(2)
                         ), f"T must be equal to {q.size(2)}, got {T} != {q.size(2)}"
-                        assert(
+                        assert (
                             causal_mask.shape == (q.size(2), k.size(2)) # [T_q, T_k]
                         ), f"causal_mask must have shape {(q.size(2), k.size(2))}, got {causal_mask.shape}"
                         # Since the attention scores tensor has shape [B, num_heads, T_q, T_k]
                         causal_mask = causal_mask.unsqueeze(0).unsqueeze(0) # [1, 1, T_q, T_k]
-                        assert(
+                        assert (
                             attn_mask.dim() == causal_mask.dim()
                         ), "attn_mask and causal_mask must be of same length for broadcasting."
                         attn_mask = attn_mask & causal_mask # [B, 1, T_q, T_k]
-                        assert(
+                        assert (
                             attn_mask.shape == (B, 1, q.size(2), k.size(2))
                         ), f"attn_mask must have shape {(B, 1, q.size(2), q.size(2))}, got {attn_mask.shape}"
 
                     # Expand to [B, num_heads, T_q, T_k] only now to avoid unnecessary memory usage.
                     attn_mask = attn_mask.expand(B, self.num_heads, T, k.size(2))
-                    assert(
+                    assert (
                         attn_mask.shape == (B, self.num_heads, q.size(2), k.size(2))
                     ), f"attn_mask must have shape {(B, self.num_heads, q.size(2), k.size(2))}, got {attn_mask.shape}"
 
@@ -720,13 +742,13 @@ class Attention(nn.Module):
                     attn_mask=attn_mask,
                     is_causal=causal if padding_mask is None else False,
                 ) # [B, num_heads, T, head_dim]
-                assert(
+                assert (
                     out.shape == (B, self.num_heads, T, self.head_dim)
                 ), f"out must have shape {(B, self.num_heads, T, self.head_dim)}, got {out.shape}"
 
                 # [B, num_heads, T, head_dim] -> [B, T, d_model]
                 out = out.transpose(1, 2).contiguous().view(B, T, D)
-                assert(
+                assert (
                     out.shape == (B, T, self.d_model)
                 ), f"out must have shape {(B, T, self.d_model)}, got {out.shape}"
 
@@ -736,7 +758,7 @@ class Attention(nn.Module):
             # Final projection
             return self.w_o(out), cache_out
 
-# TODO: Add xformers SwiGLU
+
 # TODO: add assertions to all MoE components
 
 class SwiGLUExpert(nn.Module):  
@@ -750,26 +772,76 @@ class SwiGLUExpert(nn.Module):
     def __init__(self, d_model: int, d_ffn: int, dropout: float):
         super().__init__()
 
-        self.weight1 = nn.Linear(d_model, d_ffn)
-        self.weight2 = nn.Linear(d_ffn, d_model) # Output projection layer
-        self.weight3 = nn.Linear(d_model, d_ffn)
+        self.weight1 = nn.Linear(d_model, d_ffn, bias=False)
+        self.weight2 = nn.Linear(d_model, d_ffn, bias=False)
+        self.weight3 = nn.Linear(d_ffn, d_model, bias=False)
         self.dropout = nn.Dropout(p=dropout)
+    
+    def _optimized_swiglu(self, x: torch.Tensor) -> torch.Tensor:
+        """Optimized SwiGLU activation using xformers.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, T, d_model].
+            
+        Returns:
+            torch.Tensor: Output tensor of same shape.
+
+        Notes:
+            - We do self.matrix.weight.T as xformers func needs the matrix to be broadcastable
+            with x raw (x @ matrix) (basically, without transpose we cannot apply matrix multiplication
+            due to a shape error).
+            - When we call SwiGLU, all the `None`s being passed, are `Optional[torch.Tensor]`s
+            representing bias.
+
+        Requirements:
+            xformers swiglu() import must be succesful.
+            `device` must be cuda.
+            x must live on `device` of cuda.
+            x must have dtype of float16 or bfloat16.
+        """
+        # xformers swiglu
+        if (
+            use_xformers_swiglu
+            and device.type == "cuda"
+            and x.is_cuda
+            and x.dtype in [torch.float16, torch.bfloat16]
+        ):
+            return self.dropout(swiglu(
+                x.contiguous(),
+                self.weight1.weight.T, None,
+                self.weight2.weight.T, None,
+                self.weight3.weight.T, None
+            ))
+        # pytorch swiglu fallback
+        else:
+            warnings.warn("xformers SwiGLU not available, falling back to PyTorch SwiGLU.")
+            return self._pytorch_swiglu(x)
+    
+    def _pytorch_swiglu(self, x: torch.Tensor) -> torch.Tensor:
+        """Optimized SwiGLU activation using xformers.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, T, d_model].
+            
+        Returns:
+            torch.Tensor: Output tensor of same shape.
+        """
+        return self.dropout(self.weight3(F.silu(self.weight1(x)) * self.weight2(x)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass of the SwiGLU Expert layer.
 
         Formula:
-            SwiGLU(x) = Dropout(Swish((W1 @ x + b1) * (W3 @ x + b3)) @ W2 + b2)
+            SwiGLU(x) = Dropout(Swish((W1 @ x) * (W3 @ x)) @ W2)
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
 
         Returns:
-            torch.Tensor: Output tensor passed through the expert layer with same shape.
+            torch.Tensor: Output tensor with the same shape.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
-            return self.dropout(self.weight2(F.silu(self.weight1(x)) * self.weight3(x)))
-
+            return self._optimized_swiglu(x)
 
 class TopKRouter(nn.Module):
     """TopK Routing for MoE layer.
@@ -1264,22 +1336,22 @@ class Transformer(nn.Module):
 
             # Ensure padding mask/input_ids are the same shape
             if padding_mask is not None:
-                assert(
+                assert (
                     input_ids.shape == padding_mask.shape
                 ), "input_ids and padding_mask must have the same shape for correct masking."
 
             # input_ids dimensions/dtype assertions
-            assert(
+            assert (
                 input_ids.dim() == 2
             ), f"input_ids must be a 2 dimensional tensor, got {input_ids.dim()}"
-            assert(
+            assert (
                 input_ids.dtype == torch.int64
             ), f"input_ids dtype must be int64, got {input_ids.dtype}"
 
             # Apply embeddings
             x = self.token_embed(input_ids) # [B, T, d_model]
 
-            assert(
+            assert (
                 x.dim() == 3
             ), f"x must be a 3 dimensional tensor, got {x.dim()}"
 
@@ -1292,7 +1364,7 @@ class Transformer(nn.Module):
             # Initialize aux loss as float32 tensor
             total_aux_loss = torch.tensor(0.0, dtype=torch.float32).to(device)
 
-            assert(
+            assert (
                 total_aux_loss.dtype == torch.float32
             ), f"total_aux_loss dtype must be float32, got {total_aux_loss.dtype}"
 
@@ -1332,7 +1404,7 @@ class Transformer(nn.Module):
 
             # Final projection to logits
             logits = self.lm_head(x) # [B, T, V]
-            assert(
+            assert (
                 logits.dim() == 3
             ), f"logits must have 3 dimenions, got {logits.dim()}"
 
