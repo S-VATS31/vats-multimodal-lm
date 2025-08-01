@@ -287,7 +287,6 @@ class RoPE(nn.Module):
         grid_size = int(math.sqrt(T))
         sin_x, cos_x, sin_y, cos_y = self._compute_sine_cosine(grid_size)
 
-        # Apply RoPE
         # We want q, k shapes of [B, T, num_heads, head_dim] so transpose(1, 2)
         x = self._create_rotary(x.transpose(1, 2), sin_x, cos_x, sin_y, cos_y)
 
@@ -377,7 +376,8 @@ class GroupedQueryAttention(nn.Module):
         return torch.repeat_interleave(input_tensor, heads_per_group, dim=dim_to_repeat)
 
     def forward(
-        self, x: torch.Tensor, 
+        self, 
+        x: torch.Tensor, 
         window_size: Tuple[int, int]
     ) -> torch.Tensor:
         """Perform forward pass of Attention layer.
@@ -408,27 +408,31 @@ class GroupedQueryAttention(nn.Module):
             # Chunked projection matrix
             qkv = self.w_qkv(x) # [B, T, num_heads * head_dim + 2 * query_groups * head_dim]
             assert (
-
+                qkv.shape == (B, T, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim)
+            ), (
+                f"qkv shape must be {(B, T, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim)} "
+                f"got {qkv.shape}"
             )
 
-            # q: [B, T, num_head * head_dim]
+            # q: [B, T, num_heads * head_dim]
             # kv: [B, T, 2 * query_groups * head_dim]
             q, kv = torch.split(qkv, [self.num_heads * self.head_dim, 2 * self.query_groups * self.head_dim], dim=-1)
             assert (
-
-            )
+                q.shape == (B, T, self.num_heads * self.head_dim)
+            ), f"q must have shape of {(B, T, self.num_heads * self.head_dim)}, got {q.shape}"
             assert(
-
-            )
+                kv.shape == (B, T, 2 * self.query_groups * self.head_dim)
+            ), f"kv must have shape of {(B, T, 2 * self.query_groups, self.head_dim)}, got {kv.shape}"
 
             # k, v shape: [B, T, query_groups * head_dim]
             k, v = torch.chunk(kv, chunks=2, dim=-1)
             assert (
-
-            )
-            assert(
-
-            )
+                k.shape == (B, T, self.query_groups * self.head_dim)
+                
+            ), f"k must have shape of {(B, T, self.query_groups * self.head_dim)}, got {k.shape}"
+            assert (
+                v.shape == (B, T, self.query_groups * self.head_dim)
+            ), f"v must have shape of {(B, T, self.query_groups * self.head_dim)}, got {v.shape}"
             
             # Reshape into 4D tensors for RoPE
             # q shape: [B, num_heads, T, head_dim]
@@ -438,36 +442,36 @@ class GroupedQueryAttention(nn.Module):
             v = v.view(B, T, self.query_groups, self.head_dim).transpose(1, 2)
 
             assert (
-
-            )
+                q.shape == (B, self.num_heads, T, self.head_dim)
+            ), f"q must have shape of {(B, self.num_heads, T, self.head_dim)}, got {q.shape}"
             assert (
-
-            )
+                k.shape == (B, self.query_groups, T, self.head_dim)
+            ), f"k must have shape of {(B, self.query_groups, T, self.head_dim)}, got {k.shape}"
             assert (
-
-            )
+                v.shape == (B, self.query_groups, T, self.head_dim)
+            ), f"v must have shape of {(B, self.query_groups, T, self.head_dim)}, got {v.shape}"
 
             # Apply RoPE to q and k using the new method that handles the correct tensor shapes
             q = self.rope_module(q) # [B, num_heads, T, head_dim]
             k = self.rope_module(k) # [B, query_groups, T, head_dim]
 
             assert (
-
-            )
+                q.shape == (B, self.num_heads, T, self.head_dim)
+            ), f"q must have shape of {(B, self.num_heads, T, self.head_dim)}, got {q.shape}"
             assert (
-
-            )
+                k.shape == (B, self.query_groups, T, self.head_dim)
+            ), f"k must have shape of {(B, self.query_groups, T, self.head_dim)}, got {k.shape}"
 
             # Expand kv heads to num heads for GQA
             k_expanded = self._expand_query_groups(k, self.heads_per_group, dim_to_repeat=1)
             v_expanded = self._expand_query_groups(v, self.heads_per_group, dim_to_repeat=1)
 
             assert (
-
-            )
+                k_expanded.size(1) == self.num_heads or k_expanded.size(1) == 1
+            ), f"k_expanded.size(1) must be {self.num_heads} or 1, got {k_expanded.size(1)}"
             assert (
-
-            )
+                v_expanded.size(1) == self.num_heads or v_expanded.size(1) == 1
+            ), f"v_expanded.size(1) must be {self.num_heads} or 1, got {v_expanded.size(1)}"
 
             # Flash Attention 2 + GQA + SWA
             if (
@@ -485,43 +489,41 @@ class GroupedQueryAttention(nn.Module):
                     ) # [B, T, num_heads, 3, head_dim]
                 
                 assert (
-
-                )
+                    qkv_packed.shape == (B, T, self.num_heads, 3, self.head_dim)
+                ), f"qkv_packed must have shape {(B, T, self.num_heads, 3, self.head_dim)}, got {qkv_packed.shape}"
                 assert (
-
-                )
+                    qkv_packed.is_contiguous()
+                ), "qkv_packed must be contiguous."
                 
                 # Cumulative sequence lengths for all T
-                cu_seqlens = torch.arange(0, (B + 1) * T, step=T, dtype=torch.int32).to(device)
+                cu_seqlens = torch.arange(0, (B + 1) * T, step=T, dtype=torch.int32).to(device) # [B + 1]
                 assert (
-
-                )
+                    cu_seqlens.shape == (B + 1)
+                ), f"cu_seqlens must have shape of {(B + 1)}, got {cu_seqlens.shape}"
                 assert (
-
-                )
+                    cu_seqlens.dtype == torch.int32
+                ), f"cu_seqlens must have dtype of int32, got {cu_seqlens.dtype}"
 
                 # Get maximum sequence length
                 seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
                 max_seqlen = seqlens.max().item()
 
                 assert (
-                    
-                )
-
-                total_patches = B * T
+                    len(seqlens) == len(cu_seqlens) - 1
+                ), f"len(seqlens) must be equal to len(cu_seqlens) - 1, got {len(seqlens)} != {len(cu_seqlens) - 1}"
 
                 # Flatten QKV
                 qkv_flattened = (
-                    qkv_packed.view(total_patches, self.num_heads, 3, self.head_dim)
+                    qkv_packed.view(-1, self.num_heads, 3, self.head_dim)
                     .transpose(1, 2)
                     .contiguous()
-                )
+                ) # [B * T, 3, num_heads, head_dim]
                 assert (
-
-                )
+                    qkv_flattened.shape == (B * T, 3, self.num_heads, self.head_dim)
+                ), f"qkv_flattened must have shape of {(B * T, 3, self.num_heads, self.head_dim)}, got {qkv_flattened.shape}"
                 assert (
-
-                )
+                    qkv_flattened.is_contiguous()
+                ), "qkv_flattened must be contiguous"
 
                 # Compute attention output
                 attn_out = flash_attn_varlen_qkvpacked_func(
@@ -534,31 +536,34 @@ class GroupedQueryAttention(nn.Module):
                 ) # [B * T, num_heads, head_dim]
 
                 assert (
-
-                )
+                    attn_out.shape == (B * T, self.num_heads, self.head_dim)
+                ), f"attn_out must have shape of {(B * T, self.num_heads, self.head_dim)}, got {attn_out.shape}"
 
                 # Reshape output to [B, T, d_model]
                 attn_out = attn_out.contiguous().view(B, T, self.d_model)
                 assert (
-
-                )
+                    attn_out.shape == (B, T, self.d_model)
+                ), f"attn_out must have shape of {(B, T, self.d_model)}, got {attn_out.shape}"
 
             # PyTorch SDPA (leverages Flash Attention if available)
             else:
+                warnings.warn("Flash Attention V2/SWA not available, falling back PyTorch SDPA.")
+
+                # PyTorch SDPA
                 attn_out = F.scaled_dot_product_attention(
                     q, k_expanded, v_expanded,
                     is_causal=False,
                 ) # [B, num_heads, T, head_dim]
 
                 assert (
-
-                )
+                    attn_out.shape == (B, self.num_heads, T, self.head_dim)
+                ), f"attn_out must have shape of {(B, self.num_heads, T, self.head_dim)}, got {attn_out.shape}"
                 
                 # Reshape output to [B, T, d_model]
                 attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, self.d_model)
                 assert (
-                    
-                )
+                    attn_out.shape == (B, T, self.d_model)
+                ), f"attn_out must have shape of {(B, T, self.d_model)}, got {attn_out.shape}"
 
             return self.w_o(attn_out)
 
@@ -813,7 +818,15 @@ class VisionTransformer(nn.Module):
             torch.Tensor: Class logits of shape [B, num_classes].
         """
         with autocast(device_type=device.type, dtype=dtype):
+            assert (
+                x.dim() == 4
+            ), f"x must be a 4 dimensional tensor, got {x.dim()} dimensions"
+            
+            # Patch embeddings + dropout
             x = self.dropout(self.patch_embeddings(x)) # [B, num_patches, d_model]
+            assert (
+                x.dim() == 3
+            ), f"x must be a 3 dimensional tensor, got {x.dim()} dimensions."
 
             # Pass through transformer layers
             for layer in self.transformer_layers:
@@ -831,20 +844,19 @@ class VisionTransformer(nn.Module):
             x = self.rms_norm(x) # [B, num_patches, d_model]
             x = x.transpose(1, 2) # [B, d_model, num_patches]
             x = self.pool(x) # [B, d_model, 1]
+            assert (
+                x.size(-1) == 1
+            ), f"x.size(-1) must be equal to 1, got {x.size(-1)}"
+
             x = x.squeeze(-1) # [B, d_model]
+            assert (
+                x.dim() == 2
+            ), f"x must be a 2 dimensional tensor, got {x.dim()}"
             
             # Get output logits
             logits = self.classifier(x)
+            assert (
+                logits.dim() == 2
+            ), f"logits must be a 2 dimensional tensor, got {logits.dim()}"
+
             return logits # [B, num_classes]
-
-def main():
-    model_args = ModelArgs()
-    model = VisionTransformer(model_args).to(device)
-    B, C, H, W = 2, 3, 384, 384
-    x = torch.randn(B, C, H, W).to(device)
-    logits = model(x)
-    return logits
-
-if __name__ == "__main__":
-    logits = main()
-    print(logits.shape) # torch.Size([2, 1000])
