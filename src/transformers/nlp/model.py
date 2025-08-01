@@ -181,7 +181,7 @@ class RMSNorm(nn.Module):
         d_model (int): Dimensionality of the model's embeddings.
         eps (float): Small epsilon value to ensure numerical stability.
     """
-    def __init__(self, d_model: int, eps: float = 1e-7):
+    def __init__(self, d_model: int, eps: float):
         super().__init__()
 
         self.eps = eps
@@ -865,6 +865,7 @@ class MoELayer(nn.Module):
         dropout (float): Probability of model components being dropped out.
         num_experts (float): Number of feed forward networks.
         top_k (float): Number of experts each token is routed to.
+        eps (float): Small value to maintain numerical stability in RMSNorm.
     """
     def __init__(
             self,
@@ -873,6 +874,7 @@ class MoELayer(nn.Module):
             dropout: float,
             num_experts: int,
             top_k: int,
+            eps: float,
     ):
         super().__init__()
 
@@ -895,7 +897,7 @@ class MoELayer(nn.Module):
         ])
 
         # Set up RMSNorm
-        self.rms_norm = RMSNorm(d_model)
+        self.rms_norm = RMSNorm(d_model, eps)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the Mixture of Experts layer.
@@ -1045,7 +1047,7 @@ class MoEBlock(nn.Module):
         super().__init__()
 
         self.rms_norm = RMSNorm(d_model, eps)
-        self.moe = MoELayer(d_model, d_ffn, dropout, num_experts, top_k)
+        self.moe = MoELayer(d_model, d_ffn, dropout, num_experts, top_k, eps)
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(
