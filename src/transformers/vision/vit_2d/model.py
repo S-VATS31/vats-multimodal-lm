@@ -2,9 +2,13 @@ from configs.setup_env import (
     device,
     dtype,
     use_flash_attn,
-    flash_attn_varlen_qkvpacked_func
+    flash_attn_varlen_qkvpacked_func,
+    # TODO: integrate these into FFN
+    use_xformers_swiglu,
+    swiglu
 )
 
+import warnings
 import math
 from typing import Tuple, Optional
 
@@ -17,7 +21,7 @@ from torch.utils.checkpoint import checkpoint
 from configs.transformers.vision.vit_2d.model_args.model_args_large import ModelArgs
 
 class PatchEmbeddings(nn.Module):
-    """Efficient Patch Embeddings using Conv2d for Vision Transformers.
+    """Patch Embeddings using Conv2d for Vision Transformers.
 
     Args:
         img_size (int): Height and width of the image (assumed square).
@@ -32,22 +36,18 @@ class PatchEmbeddings(nn.Module):
             raise ValueError("img_size must be divisible by patch_size")
         self.img_size = img_size
         self.patch_size = patch_size
-        self.num_patches = (img_size // patch_size) ** 2
 
         # Patch projection
         self.proj = nn.Conv2d(C_in, d_model, kernel_size=patch_size, stride=patch_size)
 
-        # CLS token
-        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with patch projection and CLS token.
+        """Forward pass with patch projection.
 
         Args:
             x (torch.Tensor): [B, C, H, W] input image tensor.
 
         Returns:
-            torch.Tensor: [B, num_patches + 1, d_model]
+            torch.Tensor: [B, num_patches, d_model]
         """
         with autocast(device_type=device.type, dtype=dtype):
             # Get batch size, height, and width
@@ -59,10 +59,6 @@ class PatchEmbeddings(nn.Module):
             x = self.proj(x) # [B, d_model, H/P, W/P]
             x = x.flatten(2) # [B, d_model, num_patches]
             x = x.transpose(1, 2) # [B, num_patches, d_model]
-
-            # Add CLS token
-            cls_tokens = self.cls_token.expand(B, -1, -1) # [B, 1, d_model]
-            x = torch.cat((cls_tokens, x), dim=1) # [B, num_patches + 1, d_model]
 
         return x
 
@@ -223,14 +219,11 @@ class RoPE(nn.Module):
         x_transposed = x.transpose(1, 2) # [B, T, num_heads, head_dim]
 
         # Calculate grid size from number of patches
-        grid_size = int(math.sqrt(T - 1)) # Exclude CLS token for grid size calculation
+        grid_size = int(math.sqrt(T))
         sin_x, cos_x, sin_y, cos_y = self.compute_sine_cosine(grid_size)
 
-        # Apply RoPE only to patch tokens (skip CLS token at position 0)
-        cls_token_x = x_transposed[:, :1, :, :] # [B, 1, num_heads, head_dim]
-        patch_tokens_x = x_transposed[:, 1:, :, :] # [B, T-1, num_heads, head_dim]
-        rotated_patch_tokens = self.create_rotary(patch_tokens_x, sin_x, cos_x, sin_y, cos_y)
-        x_final = torch.cat([cls_token_x, rotated_patch_tokens], dim=1) # [B, T, num_heads, head_dim]
+        # Apply RoPE
+        x_final = self.create_rotary(x_transposed, sin_x, cos_x, sin_y, cos_y)
 
         # Transpose back to [B, num_heads, T, head_dim]
         return x_final.transpose(1, 2)
@@ -277,6 +270,7 @@ class GroupedQueryAttention(nn.Module):
         self.query_groups = query_groups
         self.head_dim = d_model // num_heads
         self.attn_method = attn_method
+        self.heads_per_group = num_heads // query_groups
 
         # QKV projection
         self.w_qkv = nn.Linear(
@@ -301,7 +295,8 @@ class GroupedQueryAttention(nn.Module):
         self, 
         input_tensor: torch.Tensor, 
         heads_per_group: int, 
-        dim_to_repeat: int
+        dim_to_repeat: int,
+        use_mqa: bool = False,
     ) -> torch.Tensor:
         """Expand kv heads to query heads for GQA
         
@@ -309,10 +304,16 @@ class GroupedQueryAttention(nn.Module):
             input_tensor (torch.Tensor): Input key or value tensor to get expanded.
             heads_per_group (int): Heads per group computed as num_heads // query_groups.
             dim (int): Dimension of tensor to be repeated over.
+            use_mqa (bool): Whether to use Multi-query attention or not.
+                Constraints: input_tensor.size(dim_to_repeat) == 1.
+                MQA not recommended for Vision Transformers due to loss of expressiveness.
 
         Returns:
             torch.Tensor: Output tensor with kv heads expanded.
         """
+        if use_mqa and input_tensor.size(dim_to_repeat) == 1:
+            warnings.warn("Using MQA, consider switching to GQA for better results.")
+            return input_tensor
         return torch.repeat_interleave(input_tensor, heads_per_group, dim=dim_to_repeat)
 
     def forward(
@@ -322,7 +323,7 @@ class GroupedQueryAttention(nn.Module):
         """Perform forward pass of Attention layer.
 
         Args:
-            x (torch.Tensor): Input tensor of shape [B, T, d_model] where T includes CLS token.
+            x (torch.Tensor): Input tensor of shape [B, T, d_model].
             window_size (Tuple[int, int]): Window size for sliding window attention.
 
         Returns:
@@ -362,23 +363,33 @@ class GroupedQueryAttention(nn.Module):
             q = self.rope_module(q) # [B, num_heads, T, head_dim]
             k = self.rope_module(k) # [B, query_groups, T, head_dim]
 
-            # Compute heads_per_group for GQA
-            heads_per_group = self.num_heads // self.query_groups
-
             # Expand kv heads to num heads for GQA
-            k_expanded = self._expand(k, heads_per_group, dim_to_repeat=1)
-            v_expanded = self._expand(v, heads_per_group, dim_to_repeat=1)
+            k_expanded = self._expand(k, self.heads_per_group, dim_to_repeat=1)
+            v_expanded = self._expand(v, self.heads_per_group, dim_to_repeat=1)
 
-            # TODO: add checks to make sure dtype in [fp16, bf16]
             # Flash Attention 2 + GQA + SWA
-            if self.attn_method == "flash-attn" and use_flash_attn and device.type == "cuda":
+            if (
+                self.attn_method == "flash-attn" and use_flash_attn and device.type == "cuda"
+                and q.dtype in [torch.float16, torch.bfloat16]
+                and k_expanded.dtype in [torch.float16, torch.bfloat16]
+                and v_expanded.dtype in [torch.float16, torch.bfloat16]
+            ):
                 # Stack tensors along the 3rd dimension
-                qkv_packed = torch.stack([q, k_expanded, v_expanded], dim=3).contiguous() # [B, T, num_heads, 3, head_dim]
+                qkv_packed = (
+                    torch.stack([q, k_expanded, v_expanded], dim=3).transpose(1, 2).contiguous()
+                    ) # [B, T, num_heads, 3, head_dim]
+                
                 # Cumulative sequence lengths for all T
                 cu_seqlens = torch.arange(0, (B + 1) * T, step=T, dtype=torch.int32).to(device)
-                max_seqlen = k_expanded.size(2)
-                total_tokens = B * max_seqlen
-                qkv_flattened = qkv_packed.view(total_tokens, self.num_heads, 3, self.head_dim)
+
+                # Get maximum sequence length
+                seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+                max_seqlen = seqlens.max().item()
+
+                total_patches = B * T
+
+                # Flatten QKV
+                qkv_flattened = qkv_packed.view(total_patches, self.num_heads, 3, self.head_dim)
 
                 # Compute attention output
                 attn_out = flash_attn_varlen_qkvpacked_func(
@@ -446,7 +457,7 @@ class GQABlock(nn.Module):
         """Perform forward pass of GQA Block.
 
         Args:
-            x (torch.Tensor): Input tensor of shape [B, T, d_model] where T includes CLS token.
+            x (torch.Tensor): Input tensor of shape [B, T, d_model].
 
         Returns:
             torch.Tensor: Output tensor with RMSNorm, GQA, Dropout, and residuals applied.
@@ -593,6 +604,10 @@ class VisionTransformer(nn.Module):
         # RMSNorm
         self.rms_norm = RMSNorm(model_args.d_model, model_args.rms_norm_eps)
 
+        # Adaptive average pooling
+        # output size of 1 as we aggregate all predictions into a single vector
+        self.pool = nn.AdaptiveAvgPool1d(1)
+
         # Classification head
         self.classifier = nn.Linear(model_args.d_model, model_args.num_classes)
 
@@ -623,7 +638,7 @@ class VisionTransformer(nn.Module):
             torch.Tensor: Class logits of shape [B, num_classes].
         """
         with autocast(device_type=device.type, dtype=dtype):
-            x = self.dropout(self.patch_embeddings(x)) # [B, num_patches + 1, d_model]
+            x = self.dropout(self.patch_embeddings(x)) # [B, num_patches, d_model]
 
             # Pass through transformer layers
             for layer in self.transformer_layers:
@@ -633,16 +648,28 @@ class VisionTransformer(nn.Module):
                         x, 
                         self.model_args.window_size, 
                         use_reentrant=False
-                    ) # [B, num_patches + 1, d_model]
+                    ) # [B, num_patches, d_model]
                 else:
                     x = layer(x, self.model_args.window_size)
 
             # Apply final RMSNorm
-            x = self.rms_norm(x) # [B, num_patches + 1, d_model]
+            x = self.rms_norm(x) # [B, num_patches, d_model]
+            x = x.transpose(1, 2) # [B, d_model, num_patches]
+            x = self.pool(x) # [B, d_model, 1]
+            x = x.squeeze(-1) # [B, d_model]
+            
+            # Get output logits
+            logits = self.classifier(x)
+            return logits # [B, num_classes]
 
-            # Extract CLS token for classification
-            cls_token = x[:, 0] # [B, d_model]
+def main():
+    model_args = ModelArgs()
+    model = VisionTransformer(model_args).to(device)
+    B, C, H, W = 16, 3, 384, 384
+    x = torch.randn(B, C, H, W).to(device)
+    logits = model(x)
+    return logits
 
-            # Classification head
-            logits = self.classifier(cls_token) # [B, num_classes]
-            return logits
+if __name__ == "__main__":
+    logits = main()
+    print(logits.shape) # [16, 1000]
