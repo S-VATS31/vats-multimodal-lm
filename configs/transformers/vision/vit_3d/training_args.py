@@ -19,6 +19,7 @@ class TrainingArgs:
         warmup_ratio (float): Ratio of steps that are considered as warmup steps.
         aux_loss_weight (float): Auxiliary loss weight to compute total loss.
         eta_min (float): Minimum learning rate for cosine scheduler.
+        label_smoothing (float): Label smoothing parameter for computing loss.
         num_cycles (float): Number of cosine cycles completed during training.
         num_workers (int): Number of workers to load data.
         pin_memory (bool): Whether to pin memory or not.
@@ -26,7 +27,7 @@ class TrainingArgs:
         drop_last (bool): Whether the final batch (smaller than the actual batch size) is used or dropped.
         train_ratio (float): Percentage of training examples.
         grad_accum_steps (int): Gradient accumulation steps to get a larger effective batch size.
-        # TODO: add the rest of the docstrings.
+        TODO: add the rest of the hyperparameters.
     """
     learning_rate: float = 2e-4
     epochs: int = 3
@@ -39,6 +40,7 @@ class TrainingArgs:
     warmup_ratio: float = 0.05
     aux_loss_weight: float = 0.01
     eta_min: float = 6e-7
+    label_smoothing: float = 0.1
     num_cycles: float = 0.5
     num_workers: int = 8
     pin_memory: bool = True
