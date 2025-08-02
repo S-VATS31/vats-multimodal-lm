@@ -8,25 +8,20 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.amp import GradScaler
 
 from configs.transformers.vision.vit_2d.training_args import TrainingArgs
-from training.transformers.vision.vit_2d.training_components.cosine_scheduler import WarmupCosineScheduler
+from training.transformers.vision.cosine_scheduler import WarmupCosineScheduler
 
-def get_training_components(model: nn.Module, training_args: TrainingArgs) -> Tuple[
-    Optimizer, 
-    LambdaLR, 
-    GradScaler
-]:
+def get_training_components(
+    model: nn.Module, 
+    training_args: TrainingArgs
+) -> Tuple[Optimizer, LambdaLR, GradScaler]:
     """Set up optimizer, learning rate scheduler, and gradient scaler.
     
     Args:
-        model (nn.Module): Vision Transformer architecture.
+        model (nn.Module): Transformer architecture.
         training_args (TrainingArgs): Training hyperparameters.
 
     Returns:
-        Tuple[
-            Optimizer, 
-            optim.lr_scheduler.LambdaLR, 
-            GradScaler
-        ]:
+        Tuple[Optimizer, LambdaLR, GradScaler]:
             - Optimizer: AdamW optimizer.
             - LambdaLR: Custom cosine warmup learning rate scheduler.
             - GradScaler: Gradient scaling for bf16/fp16 gradients.
