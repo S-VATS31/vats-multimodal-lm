@@ -9,7 +9,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.amp import GradScaler
 
 from configs.transformers.nlp.training_args import TrainingArgs
-from training.transformers.nlp.training_components.cosine_scheduler import cosine_with_warmup_scheduler
+from training.transformers.nlp.cosine_scheduler import cosine_with_warmup_scheduler
 
 def setup_training_components(
     model: nn.Module,
