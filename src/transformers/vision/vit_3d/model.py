@@ -7,6 +7,7 @@ from configs.setup_env import (
     swiglu
 )
 
+import math
 import warnings
 from typing import Tuple, Optional
 
@@ -24,22 +25,24 @@ class PatchEmbeddings3D(nn.Module):
     Args:
         C_in (int): Number of input channels.
         patch_size (Tuple[int, int, int]): Patch size in (T, H, W).
+        target_size (Tuple[int, int]): Optimal video height and width: (H, W).
+        max_frames (int): Maximum frames to train the ViT with. Used for padding/truncation.
         d_model (int): Dimensionality of the model's embeddings.
-        dropout (float): Dropout probability applied after normalization.
-        eps (float): Epsilon for RMSNorm stability.
     """
     def __init__(
         self,
         C_in: int,
         patch_size: Tuple[int, int, int],
+        target_size: Tuple[int, int],
+        max_frames: int,
         d_model: int,
-        dropout: float,
-        eps: float,
     ):
         super().__init__()
 
         self.patch_size = patch_size
         self.d_model = d_model
+        self.target_size = target_size
+        self.max_frames = max_frames
 
         # Conv3D projection
         self.projection = nn.Conv3d(
@@ -50,34 +53,159 @@ class PatchEmbeddings3D(nn.Module):
             bias=False
         )
 
-        # Set up RMS Norm/Dropout
-        self.rms_norm = RMSNorm(d_model, eps)
-        self.dropout = nn.Dropout(p=dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Args:
+    def forward(
+        self, 
+        x: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Tuple[int, int, int], torch.Tensor, Tuple[int, int, int]]:
+        """Perform forward pass of Patch Embeddings 3D layer.
+        
+        Args:
             x (torch.Tensor): Input tensor of shape [B, C_in, T, H, W].
 
         Returns:
-            torch.Tensor: Patch embeddings of shape [B, N, d_model].
+            Tuple:
+                - torch.Tensor: Patch embeddings of shape [B, N, d_model].
+                - Tuple[int, int, int]: Processed video shape (T, H, W).
+                - torch.Tensor: Padding mask of shape [B, N].
+                - Tuple[int, int, int]: Grid size as (grid_t, grid_h, grid_w)
         """
-        with autocast(device_type=x.device.type, dtype=x.dtype):
+        with autocast(device_type=device.type, dtype=dtype):
             assert(
                 x.dim() == 5
             ), f"x must be a 5 dimenional tensor, got {x.dim()} dimensions"
-            B, _, T, H, W = x.shape
+            B, C, T, H, W = x.shape
+            assert (
+                len(self.patch_size) == 3
+            ), f"len(patch_size) must be equal to 3, got {len(self.patch_size)} elements."
             pt, ph, pw = self.patch_size
-            
-            # Calculate padding needed to make T, H, W divisible by patch size
-            pad_t = (pt - T % pt) % pt
-            pad_h = (ph - H % ph) % ph
-            pad_w = (pw - W % pw) % pw
 
-            # Pad in reverse order: (W_left, W_right, H_left, H_right, T_left, T_right)
-            x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_t), mode='constant', value=0)
+            # Reshape input video over the height and width pixels, H and W
+            x = F.interpolate(
+                x.transpose(1, 2).contiguous().view(B * T, C, H, W), 
+                size=self.target_size, 
+                mode='bilinear',
+                align_corners=False
+            ).view(B, C, T, *self.target_size) # [B, C, T, new_H, new_W]
+
+            assert (
+                x.size(-2) == self.target_size[0] and x.size(-1) == self.target_size[1]
+            ), (
+                f"x.size(-2) must be {self.target_size[0]}, got {x.size(-2)} "
+                f"x.size(-1) must be {self.target_size[1]}, got {x.size(-1)}."
+            )
+
+            # Construct padding mask
+            if padding_mask is None:
+                padding_mask = torch.ones(
+                    (B, T), dtype=torch.bool
+                ).to(device) # Assume all frames are valid to start
+
+                assert (
+                    padding_mask.shape == (B, T)
+                ), f"padding_mask must have shape of {(B, T)}, got {padding_mask.shape}"
+                assert (
+                    padding_mask.dtype == torch.bool
+                ), f"padding_mask must be a boolean tensor, got {padding_mask.dtype}"
+                assert (
+                    torch.all(padding_mask == True)
+                ), "All positions must start True."
             
-            # Project patch embeddings and flatten
-            x = self.projection(x) # [B, d_model, T, H, W] C_in (in) -> d_model (out)
+            assert (
+                padding_mask is not None
+            ), "padding mask should not be None at this point."
+
+            # Apply padding or truncation based on input frames, T
+            if T < self.max_frames:
+                frames_to_pad = self.max_frames - T
+                x = F.pad(
+                    x, (0, 0, 0, 0, 0, frames_to_pad), 
+                    mode="constant", value=0
+                ) # Pad over end of time dimension to fill video frames
+                # Concatenate frames to pad with padding mask as padded positions
+                pad_frames = torch.zeros((B, frames_to_pad), dtype=padding_mask.dtype).to(padding_mask.device)
+                assert (
+                    torch.all(pad_frames == False)
+                ), "All padded frames must be False."
+                assert (
+                    pad_frames.dtype == padding_mask.dtype
+                ), "pad_frames and padding_mask must have the same dtype"
+                assert (
+                    pad_frames.device.type == padding_mask.device.type
+                ), "pad_frames and padding_mask must have the same device"
+
+                padding_mask = torch.cat([padding_mask, pad_frames], dim=1) # [B, max_frames]
+                assert (
+                    padding_mask.size(1) == self.max_frames
+                ), f"padding_mask.size(1) must be {self.max_frames}, got {padding_mask.size(1)}"
+
+            elif T > self.max_frames:
+                warnings.warn(
+                    f"Maximum input frames allowed: {self.max_frames}, received: {T} frames "
+                    f"Trucating {T - self.max_frames} frames."
+                )
+                # [B, C, max_frames, new_H, new_W]
+                x = x[:, :, :self.max_frames] # Truncate over time in frames dimension
+                assert (
+                    x.shape == (B, C, self.max_frames, *self.target_size)
+                ), (
+                    f"Truncation failed: "
+                    f"x must have shape of {(B, C, self.max_frames, *self.target_size)}, got {x.shape}"
+                )
+
+                padding_mask = padding_mask[:, :self.max_frames] # [B, max_frames]
+                assert(
+                    padding_mask.shape == (B, self.max_frames)
+                ), f"padding_mask must have shape of {(B, self.max_frames)}, got {padding_mask.shape}"
+
+            # Store processed dimensions for dynamic grid computation later
+            processed_T = x.size(2)
+            processed_H, processed_W = x.size(3), x.size(4)
+            processed_shape = (processed_T, processed_H, processed_W)
+
+            # Compute total number of patches
+            grid_t = processed_T // pt
+            grid_h = processed_H // ph
+            grid_w = processed_W // pw
+            grid_size = (grid_t, grid_h, grid_w)
+            N = grid_t * grid_h * grid_w
+
+            # Project patch embeddings
+            x = self.projection(x) # [B, d_model, T, H, W]; C_in (in) -> d_model (out)
+            assert (
+                x.size(1) == self.d_model
+            ), f"x.size(1) must {self.d_model}, got {x.size(1)}"
+
+            # Convert frame level mask (T) to patch level (N)
+            # Instead of checking frame by frame validity, we check patch by patch
+            # max_pool1d expects float tensor
+            frame_mask = padding_mask[:, :processed_T].unsqueeze(1).float() # [B, 1, T]
+            assert (
+                frame_mask.size(1) == 1
+            ), f"frame_mask.size(1) must be 1, got {frame_mask.size(1)}"
+
+            pooled = (
+                F.max_pool1d(frame_mask, kernel_size=pt, stride=pt, ceil_mode=True) # gracefully rounds, no truncation
+                .squeeze(1)
+                .bool()
+            ) # [B, grid_t]
+            assert (
+                pooled.shape == (B, grid_t)
+            ), f"pooled must have shape of {(B, grid_t)}, got {pooled.shape}"
+            assert (
+                pooled.dtype == torch.bool
+            ), f"pooled must be a boolean tensor, got {pooled.dtype}"
+
+            # Create patch mask of shape [B, N]
+            patch_mask = (
+                pooled[:, :, None, None] # [B, grid_t, 1, 1], need singleton dimensions to expand
+                .expand(B, grid_t, grid_h, grid_w) # returns non-contiguous tensor, call .contiguous()
+                .contiguous()
+                .view(B, N)
+            )
+            assert (
+                patch_mask.shape == (B, N)
+            ), f"patch_mask must have shape of {(B, N)}, got {patch_mask.shape}"
             
             assert(
                 x.size(1) == self.d_model
@@ -87,9 +215,11 @@ class PatchEmbeddings3D(nn.Module):
             ), f"x must be a 5 dimenional tensor, got {x.dim()} dimensions"
 
             x = x.view(B, self.d_model, -1).transpose(1, 2) # [B, N, d_model]
+            assert (
+                x.shape == (B, N, self.d_model)
+            ), f"x must have shape of {(B, N, self.d_model)}, got {x.shape}"
 
-            # Apply normalization and dropout
-            return self.rms_norm(self.dropout(x))
+            return x, processed_shape, patch_mask, grid_size
 
 
 class RoPE3D(nn.Module):
@@ -134,10 +264,20 @@ class RoPE3D(nn.Module):
 
         # Compute inverse frequencies for T, H, W
         # inv_freq = 1 / (theta ^ (2i/d)) where d = dim_per_axis
-        for _ in range(3): # T, H, W
+        for i in range(3): # T, H, W
             num_pairs = self.dim_per_axis // 2
-            freqs = 1.0 / (self.theta ** (torch.arange(0, num_pairs) * 2.0 / self.dim_per_axis))
+            freqs = 1.0 / (
+                self.theta ** (
+                    torch.arange(0, num_pairs, dtype=torch.float32) * 2.0 / self.dim_per_axis)
+                )
             freqs_per_dim.append(freqs)
+
+            assert (
+                freqs_per_dim[i].dtype == torch.float32
+            ), f"All inverse frequencies must have dtype of float32, got {freqs_per_dim[i].dtype}"
+            assert (
+                freqs_per_dim[i].shape == (self.head_dim // 6,)
+            ), f"inv_freq must have shape of {(self.head_dim // 6,)}, got {freqs_per_dim[i].shape}"
         
         # Store inverse frequencies non-learnable buffers
         # No return, we can directly access buffers using self.freqs_t, ...
@@ -188,29 +328,41 @@ class RoPE3D(nn.Module):
         Returns:
             torch.Tensor: Rotated input tensor.
         """
+        assert (
+            x.dim() == 4
+        ), f"x must be a 4 dimensional tensor, got {x.dim()}"
         B, N, num_heads, _ = x.shape
 
         # Get number of pairs and compute end dimension
         num_pairs = len(freqs)
         end_dim = start_dim + num_pairs * 2
         
-        # Apply RoPE over sequence length dimension
+        # Apply RoPE over head_dim dimension
         x_rope = x[..., start_dim:end_dim]
+        assert (
+            x_rope.shape == (B, N, num_heads, num_pairs * 2)
+        ), f"x_rope must have shape of {((B, N, num_heads, num_pairs * 2))}, got {x_rope.shape}"
 
         # Concatenate unrotated and rotated parts of input tensor to use later
         x_pass = torch.cat([
-            x[..., :start_dim], 
-            x[..., end_dim:]
+            x[..., :start_dim], # before RoPE application
+            x[..., end_dim:]    # after RoPE appliaction
         ], dim=-1) if start_dim > 0 or end_dim < x.size(-1) else torch.empty_like(x[..., :0])
         
         x_rope = x_rope.view(B, N, num_heads, num_pairs, 2)
+        assert (
+            x_rope.shape == (B, N, num_heads, num_pairs, 2)
+        ), f"x_rope must have shape of {(B, N, num_heads, num_pairs, 2)}, got {x_rope.shape}"
         
         # Compute angles via p * w where p = positions, w = freqs
-        angles = positions.unsqueeze(1) * freqs.unsqueeze(0)
+        # positions shape: [N, 3] -> [N, 1, 3]
+        # freqs shape: [head_dim // 6] -> [1, head_dim // 6]
+        angles = positions[:, None] * freqs[None]
 
-        # Compute cosine and sine matrices for rotation matrix:
-        cos_vals = torch.cos(angles).unsqueeze(0).unsqueeze(2).unsqueeze(4)
-        sin_vals = torch.sin(angles).unsqueeze(0).unsqueeze(2).unsqueeze(4)
+        # Compute cosine and sine matrices for rotation matrix
+        # Add singleton dimensions for broadcastability
+        cos_vals = torch.cos(angles)[None, :, None, :, None]
+        sin_vals = torch.sin(angles)[None, :, None, :, None]
         
         # rotation matrix = [[cos(x), -sin(x)], [sin(x), cos(x)]]
         # x_rot = x * rotation_matrix (element wise)
@@ -221,6 +373,9 @@ class RoPE3D(nn.Module):
         ], dim=-1)
         
         x_rope_rotated = x_rope_rotated.view(B, N, num_heads, num_pairs * 2)
+        assert (
+            x_rope_rotated.shape == (B, N, num_heads, num_pairs * 2)
+        ), f"x_rope_rotated must have shape {(B, N, num_heads, num_pairs * 2)}, got {x_rope_rotated.shape}"
         
         # Greater than 0 means rotation did not occur
         if x_pass.size(-1) > 0:
@@ -271,7 +426,7 @@ class RoPE3D(nn.Module):
     def forward(
         self, 
         x: torch.Tensor, 
-        grid_shape: Tuple[int, int, int]
+        grid_shape: Tuple[int, int, int],
     ) -> torch.Tensor:
         """Apply 3D RoPE to input tensor.
         
@@ -415,6 +570,7 @@ class Attention(nn.Module):
         B: int,
         N: int,
         window_size: Tuple[int, int],
+        padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Optimized attention method leveraging flash attention 2, sliding window attention, and GQA.
         
@@ -425,93 +581,102 @@ class Attention(nn.Module):
             B (int): Batch size.
             N (int): Number of patches.
             window_size (Tuple[int, int]): Window size for sliding window attention.
+            padding_mask (Optional[torch.Tensor]): Padding mask of shape [B, N].
 
         Returns:
             torch.Tensor: Output tensor of shape [B, N, d_model].
 
+        Notes:
+            B * N gives us total patches.
+
+        Requirements:
+            Flash attention import must be succesful.
+            `device` must be cuda.
+            q, k, v tensors must be float16 or bfloat16.
+
         NOTE: OPTIMIZED ATTENTION HAS NOT BEEN TESTED DUE TO HARDWARE REQUIREMENTS.
         """
         # Optimized Flash Attention 2 + SWA + GQA or MQA route
-        # Requirements:
-        # - Flash attention import must be succesful
-        # - `device` must be cuda
-        # - qkv tensors must have a dtype of bf16/fp16.
         if (
             use_flash_attn and device.type == "cuda"
             and query.dtype in [torch.float16, torch.bfloat16]
             and key.dtype in [torch.float16, torch.bfloat16] 
             and value.dtype in [torch.float16, torch.bfloat16]
         ):
-            # Concatenate tensors along 3rd dimension
-            qkv_packed = torch.stack([query, key, value], dim=3).contiguous() # [B, N, num_heads, 3, head_dim]
+            if padding_mask is not None:
+                # Create padding mask
+                assert (
+                    padding_mask.shape == (B, N)
+                ), f"padding_mask must have shape {(B, N)}, got {padding_mask.shape}."
+                
+                # padding_mask: True = valid patches, False = padded patches
+                valid_mask = padding_mask.bool()
+                seq_lens = valid_mask.sum(dim=1).to(torch.int32) # [B]
+                # Get cumulative sequence lengths
+                cu_seqlens = F.pad(torch.cumsum(seq_lens, dim=0), pad=(1, 0)) # [B + 1]
+                max_seqlen = seq_lens.max().item()
 
-            assert(
-                qkv_packed.shape == (B, N, self.num_heads, 3, self.head_dim)
-            ), f"qkv_packed must have shape {(B, N, self.num_heads, 3, self.head_dim)}, got{qkv_packed.shape}"
-            assert(
-                qkv_packed.is_contiguous()
-            ), "qkv_packed must be contiguous."
+                # Stack tensors along 3rd dimension
+                qkv_packed = (
+                    torch.stack([query, key, value], dim=3).contiguous()
+                )  # [B, N, num_heads, 3, head_dim]
 
-            # Get cumulative sequence lengths
-            cu_seqlens = torch.arange(0, (B + 1) * N, N, dtype=torch.int32).to(device) # [B + 1]
+                assert(
+                    qkv_packed.shape == (B, N, self.num_heads, 3, self.head_dim)
+                ), f"qkv_packed must have shape {(B, N, self.num_heads, 3, self.head_dim)}, got {qkv_packed.shape}"
+                assert(
+                    qkv_packed.is_contiguous()
+                ), "qkv_packed must be contiguous."
 
-            assert(
-                cu_seqlens.shape == (B + 1)
-            ), f"cu_seqlens must have shape {(B + 1)}, got {cu_seqlens.shape}"
-            assert(
-                cu_seqlens.dtype == torch.int32
-            ), f"cu_seqlens dtype must be int32, got {cu_seqlens.dtype}"
+                # Get valid patches (to not be padded)
+                valid_patches = valid_mask.view(-1) # [B * N]
 
-            # We can compute the maximum seqeunce length by taking the difference between cumulative sequences
-            # This gives us our true sequence length where we can compute the max
-            seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-            max_seqlen = seq_lens.max().item()
+                # Flatten packed tensor
+                qkv_flattened = (
+                    qkv_packed.view(-1, self.num_heads, 3, self.head_dim)
+                    .transpose(1, 2)
+                    .contiguous()
+                ) # [B * N, 3, num_heads, head_dim]
 
-            assert(
-                len(seq_lens) == len(cu_seqlens) - 1
-            ), f"len(seq_lens) must be len(cu_seqlens) - 1, got {len(seq_lens)} != {len(cu_seqlens)} - 1"
+                # Index by valid patches - only keep valid patches for flash attention
+                qkv_valid = qkv_flattened[valid_patches]
+                
+                assert(
+                    qkv_valid.shape == (valid_patches.sum().item(), 3, self.num_heads, self.head_dim)
+                ), f"qkv_valid must have correct shape, got {qkv_valid.shape}"
+                assert(
+                    qkv_valid.is_contiguous()
+                ), "qkv_valid must be contiguous"
+                
+                # Call FlashAttention 2
+                attn_out = flash_attn_varlen_qkvpacked_func(
+                    qkv_valid,
+                    cu_seqlens,
+                    max_seqlen,
+                    causal=False,
+                    softmax_scale=1.0 / (math.sqrt(self.head_dim)),
+                    window_size=window_size,
+                ) # [num_valid_patches, num_heads, head_dim]
 
-            # Compute total tokens
-            total_tokens = B * max_seqlen
+                # Reconstruct padded positions
+                attn_out_full = (
+                    torch.zeros(B * N, self.num_heads, self.head_dim, dtype=attn_out.dtype)
+                    .to(attn_out.device)
+                )
+                # Fill valid positions
+                attn_out_full[valid_patches] = attn_out
+                attn_out_full = attn_out_full.view(B, N, -1) # [B, N, d_model]
 
-            # Flatten packed tensor
-            qkv_flattened = qkv_packed.view(
-                total_tokens, 
-                self.num_heads, 3, 
-                self.head_dim).transpose(1, 2).contiguous() # [total_tokens, 3, num_heads, head_dim]
-            
-            assert(
-                qkv_flattened.shape == (total_tokens, 3, self.num_heads, self.head_dim)
-            ), f"qkv_flattened must have shape {(total_tokens, 3, self.num_heads, self.head_dim)}, got {qkv_flattened.shape}"
-            assert(
-                qkv_flattened.is_contiguous()
-            ), "qkv_flattened must be contiguous"
-            
-            # Call FlashAttention 2
-            attn_out = flash_attn_varlen_qkvpacked_func(
-                qkv_flattened,
-                cu_seqlens,
-                max_seqlen,
-                causal=False,
-                softmax_scale=1.0 / (self.head_dim ** 0.5),
-                window_size=window_size,
-            ) # [total_tokens, num_heads, head_dim]
+                return attn_out_full # return output with padded positions
+            else:
+                # TODO: maybe implement this, but typically padding_mask != None
+                warnings.warn("no fallback to padding_mask == None.")
 
-            assert(
-                attn_out.shape == (total_tokens, self.num_heads, self.head_dim)
-            ), f"attn_out must have shape of {(total_tokens, self.num_heads, self.head_dim)}, got {attn_out.shape}"
-
-            attn_out = attn_out.contiguous().view(B, N, -1) # [B, N, d_model]
-            assert(
-                attn_out.shape == (B, N, self.d_model)
-            ), f"attn_out must have shape of {(B, N, self.d_model)}, got {attn_out.shape}"
-
-            return attn_out
-        
         # Either import didn't work, or no cuda; fallback to gqa/flash attn, w/o swa
         else:
             warnings.warn("Optimized attention not available, using PyTorch SDPA.")
-            return self._grouped_query_attention(query, key, value, B, N)
+            return self._grouped_query_attention(query, key, value, B, N, padding_mask)
+
 
     def _grouped_query_attention(
         self,
@@ -520,6 +685,7 @@ class Attention(nn.Module):
         value: torch.Tensor,
         B: int,
         N: int,
+        padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """PyTorch's scaled dot production attention with GQA, no SWA available.
 
@@ -529,6 +695,7 @@ class Attention(nn.Module):
             value (torch.Tensor): Value tensor of shape [B, N, num_heads, head_dim].
             B (int): Batch size.
             N (int): Number of patches.
+            padding_mask (Optional[torch.Tensor]): Padding mask of shape [B, N].
 
         Returns:
             torch.Tensor: Output tensor of shape [B, N, d_model].
@@ -538,10 +705,18 @@ class Attention(nn.Module):
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
+        # Set up padding mask to be broadcastable
+        if padding_mask is not None:
+            # True (valid) -> True (attend), False (padded) -> False (don't attend)
+            attention_mask = padding_mask.bool() # Keep valid patches as True
+            attention_mask = attention_mask[:, None, None, :] # [B, 1, 1, N]
+        else:
+            attention_mask = None
+
         # Apply PyTorch SDPA
         attn_out = F.scaled_dot_product_attention(
             query, key, value,
-            is_causal=False
+            attn_mask=attention_mask
         ) # [B, num_heads, N, head_dim]
 
         assert(
@@ -559,7 +734,8 @@ class Attention(nn.Module):
         self, 
         x: torch.Tensor,
         grid_size: Tuple[int, int, int],
-        window_size: Optional[Tuple[int, int]] = None
+        window_size: Optional[Tuple[int, int]] = None,
+        padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Perform forward pass of the attention layer.
         
@@ -567,6 +743,7 @@ class Attention(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, N, d_model].
             grid_size (Tuple[int, int, int]): Grid size parameter for RoPE.
             window_size (Tuple[int, int]): Window size for SWA.
+            padding_mask (Optional[torch.Tensor]): Padding mask of shape [B, N].
 
         Returns:
             torch.Tensor: Output tensor of shape [B, N, d_model].
@@ -584,7 +761,6 @@ class Attention(nn.Module):
                 f"qkv must have shape of {(B, N, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim)} "
                 f"got {qkv.shape}"
             )
-            
 
             # q shape: [B, N, num_heads * head_dim], kv shape: [B, N, 2 * query_groups * head_dim]
             q, kv = torch.split(qkv, [self.num_heads * self.head_dim, 2 * self.query_groups * self.head_dim], dim=-1)
@@ -657,9 +833,9 @@ class Attention(nn.Module):
 
             # Apply optimized attention if available
             if window_size is not None:
-                attn_out = self._optimized_attention(q, k, v, B, N, window_size)
+                attn_out = self._optimized_attention(q, k, v, B, N, window_size, padding_mask)
             else:
-                attn_out = self._grouped_query_attention(q, k, v, B, N)
+                attn_out = self._grouped_query_attention(q, k, v, B, N, padding_mask)
 
             assert(
                 attn_out.shape == (B, N, self.d_model)
@@ -698,14 +874,17 @@ class GatedFFN(nn.Module):
             torch.Tensor: Output tensor of same shape.
 
         Requirements:
-            xformers import must be succesful
-            `device` must be cuda
-            x.dtype must be float16/bfloat16
+            xformers import must be succesful.
+            `device` must be cuda.
+            x must live on `device` of cuda.
+            x.dtype must be float16/bfloat16.
         """
         with autocast(device_type=device.type, dtype=dtype):
             # Optimized SwiGLU
             if (
-                use_xformers_swiglu and device.type == "cuda"
+                use_xformers_swiglu 
+                and device.type == "cuda"
+                and x.is_cuda
                 and x.dtype in [torch.float16, torch.bfloat16]
             ):
                 return self.dropout(swiglu(
@@ -721,7 +900,7 @@ class GatedFFN(nn.Module):
     
     def _pytorch_swiglu(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch implementation of SwiGLU, fallback for xformers SwiGLU.
-        
+
         Args:
             x (torch.Tensor): Input tensor of shape [B, N, d_model].
         
@@ -778,7 +957,8 @@ class AttentionBlock(nn.Module):
         self, 
         x: torch.Tensor,
         grid_size: Tuple[int, int, int],
-        window_size: Optional[Tuple[int, int]] = None
+        window_size: Optional[Tuple[int, int]] = None,
+        padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Perform forward pass of the Attention layer.
 
@@ -786,13 +966,21 @@ class AttentionBlock(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, N, d_model].
             grid_size (Tuple[int, int, int]): Grid size parameter for RoPE.
             window_size (Optional[Tuple[int, int]]): Window size for SWA.
+            padding_mask: (Optional[torch.Tensor]): Padding mask of shape [B, N].
 
         Returns:
             torch.Tensor: Output tensor of shape [B, N d_model].
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return x + self.dropout(self.attention(self.rms_norm(x), grid_size, window_size))
-    
+            return x + self.dropout(
+                self.attention(
+                    self.rms_norm(x),
+                    grid_size=grid_size,
+                    window_size=window_size,
+                    padding_mask=padding_mask,
+                )
+            )
+
 
 class GatedFFNBlock(nn.Module):
     """Gated FFN block with a pass through the FFN, dropout, normalization, and residuals applied.
@@ -849,14 +1037,20 @@ class TransformerBlock(nn.Module):
     ):
         super().__init__()
 
-        self.attention_block = AttentionBlock(d_model, num_heads, query_groups, rope_theta, eps, dropout, patch_size)
-        self.gated_ffn_block = GatedFFNBlock(d_model, d_ffn, dropout, eps)
+        self.attention_block = AttentionBlock(
+            d_model, num_heads, query_groups, 
+            rope_theta, eps, dropout, patch_size
+        )
+        self.gated_ffn_block = GatedFFNBlock(
+            d_model, d_ffn, dropout, eps
+        )
 
     def forward(
         self, 
         x: torch.Tensor,
         grid_size: Tuple[int, int, int],
         window_size: Optional[Tuple[int, int]] = None,
+        padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Perform forward pass of the Transformer block.
 
@@ -869,7 +1063,9 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor of shape [B, N, d_model].
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return self.gated_ffn_block(self.attention_block(x, grid_size, window_size))
+            return self.gated_ffn_block(
+                self.attention_block(x, grid_size, window_size, padding_mask)
+            )
         
 
 class VideoTransformer(nn.Module):
@@ -887,9 +1083,9 @@ class VideoTransformer(nn.Module):
         self.patch_embeddings = PatchEmbeddings3D(
             C_in=model_args.C_in,
             patch_size=model_args.patch_size,
+            target_size=model_args.target_size,
+            max_frames=model_args.max_frames,
             d_model=model_args.d_model,
-            dropout=model_args.dropout,
-            eps=model_args.rms_norm_eps,
         )
 
         # Stack transformer encoder layers
@@ -995,31 +1191,11 @@ class VideoTransformer(nn.Module):
             # Scale FFN output projection  
             if hasattr(layer.gated_ffn_block.gated_ffn, 'w2'):
                 layer.gated_ffn_block.gated_ffn.w2.weight.data.mul_(scale_factor)
-    
-    def _compute_grid_size(
-        self,
-        video_shape: Tuple[int, int, int],
-        patch_size: Tuple[int, int, int],
-    ) -> Tuple[int, int, int]:
-        """Compute grid size dynamically based on input T, H, W and patch sizes.
         
-        Args:
-            video_shape (Tuple[int, int, int]): Input video shape as (T, H, W).
-            patch_size (Tuple[int, int, int]): Patch size as (pt, ph, pw).
-
-        Returns:
-            Tuple[int, int, int]: Returns grid size as (grid_t, grid_h, grid_w).
-        """
-        # Initialize grid dimensions
-        grid_dims = []
-        for dim_length, patch_length in zip(video_shape, patch_size):
-            # Compute the number of patches needed (rounding up to cover all input)
-            num_patches = (dim_length + patch_length - 1) // patch_length
-            grid_dims.append(num_patches)
-
-        return tuple(grid_dims)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, 
+        x: torch.Tensor,
+    ) -> torch.Tensor:
         """Perform forward pass of the entire video transformer.
         
         Args:
@@ -1028,17 +1204,14 @@ class VideoTransformer(nn.Module):
         Returns:
             torch.Tensor: Returns logits of shape [B, num_classses].
         """
-        # Get T, H, W and store as a tuple
-        _, _, T, H, W = x.size()
         assert(
             x.dim() == 5
         ), f"x must be a 5 dimensional tensor, got {x.dim()} dimensions"
 
-        video_shape = (T, H, W)
-        grid_size = self._compute_grid_size(video_shape=video_shape, patch_size=self.model_args.patch_size)
-
-        # Apply patch embeddings and dropout
-        x = self.dropout(self.patch_embeddings(x)) # [B, N, d_model]
+        # Apply patch embeddings and dropout, get processed dimensions 
+        x, _, padding_mask, grid_size = self.patch_embeddings(x)
+        x = self.dropout(x) # [B, N, d_model]
+        
         assert(
             x.dim() == 3
         ), f"x must be a 3 dimenional tensor after patch embeddings, got {x.dim()} dimensions."
@@ -1050,11 +1223,12 @@ class VideoTransformer(nn.Module):
                     layer, 
                     x, 
                     grid_size,
-                    self.model_args.window_size, 
+                    self.model_args.window_size,
+                    padding_mask,
                     use_reentrant=False
                 )
             else:
-                x = layer(x, grid_size, self.model_args.window_size)
+                x = layer(x, grid_size, self.model_args.window_size, padding_mask)
 
         # Apply final RMSNorm
         x = self.rms_norm(x) # [B, N, d_model]
