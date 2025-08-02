@@ -24,9 +24,7 @@ class AutoregressiveTokenGenerator:
             max_seq_len=model_args.max_seq_len,
             num_heads=model_args.query_groups,
             head_dim=model_args.d_model // model_args.num_heads,
-            num_layers=model_args.num_layers,
-            dtype=dtype,
-            device=device
+            num_layers=model_args.num_layers
         )
 
     def _generate(
@@ -237,6 +235,10 @@ class AutoregressiveTokenGenerator:
         Returns:
             str: Generated text based on prompt.
         """
+        # Handle empty input prompts
+        if not prompt or not prompt.strip():
+            return "Please enter a valid prompt."
+        
         input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
         
         # Turn off gradient computation for token generation
@@ -252,7 +254,7 @@ class AutoregressiveTokenGenerator:
                     do_sample=generation_args.do_sample,
                     pad_token_id=generation_args.pad_token_id,
                     eos_token_id=generation_args.eos_token_id,
-                    attention_mask=None,
+                    attention_mask=None, # Will automatically create attention mask
                     use_cache=generation_args.use_cache
                 )
 
