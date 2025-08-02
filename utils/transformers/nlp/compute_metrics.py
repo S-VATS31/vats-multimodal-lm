@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -21,7 +21,7 @@ def compute_loss(
         aux_loss (torch.Tensor): aux_loss scalar tensor.
     
     Returns:
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Tuple containing total loss, lm loss, aux loss.
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             - torch.Tensor: Total loss.
             - torch.Tensor: Language modeling loss.
             - torch.Tensor: Auxiliary loss.
@@ -42,13 +42,13 @@ def compute_loss(
         # Initialize aux loss as 0 tensor
         return lm_loss, lm_loss, torch.tensor(0.0).to(lm_loss.device)
 
-def compute_perplexity(loss: float) -> float:
+def compute_perplexity(loss: Union[torch.Tensor, float]) -> Union[torch.Tensor, float]:
     """Compute perplexity using the LM loss.
     
     Args:
-        loss (float): LM loss used to compute perplexity.
+        loss (Union[torch.Tensor, float]): LM loss used to compute perplexity.
 
     Returns:
         float: Perplexity computed by taking the exponent of the loss.
     """
-    return math.exp(loss)
+    return torch.exp(loss) if isinstance(loss, torch.Tensor) else math.exp(loss)
