@@ -13,18 +13,21 @@ from configs.transformers.nlp.generation_args import GenerationArgs
 from src.transformers.nlp.text_cleaning.text_quality_filter import TextQualityFilter
 from src.transformers.nlp.text_cleaning.deduplication_filter import DeduplicationFilter
 from data.transformers.nlp.create_dataloader import create_dataloader
-from training.transformers.nlp.training_components.setup_training_components import setup_training_components
+from training.transformers.nlp.setup_training_components import setup_training_components
 from training.transformers.nlp.loops.training_loop import train
 from training.transformers.nlp.loops.validation_loop import validate
-from save_load_checkpoints.transformers.nlp.save_checkpoint import save_checkpoint
-from save_load_checkpoints.transformers.nlp.load_checkpoint import load_checkpoint
+from utils.transformers.nlp.checkpointing import save_checkpoint, load_checkpoint
 from utils.transformers.nlp.compute_metrics import compute_perplexity
 from utils.transformers.nlp.visualization import plot_metrics
 from utils.setup_logger import setup_logger
 from src.transformers.nlp.generate import AutoregressiveTokenGenerator
 
 # Set up logger
-training_logger = setup_logger(name="training_logger", log_file="training.log", level=logging.INFO)
+training_logger = setup_logger(
+    name="training_logger", 
+    log_file="training.log", 
+    level=logging.INFO
+)
 
 def main(
     dataset_name: str,

@@ -10,9 +10,8 @@ from utils.transformers.vision.vit_2d.visualization import plot_metrics
 from training.transformers.vision.vit_2d.loops.training_loop import train
 from training.transformers.nlp.loops.validation_loop import validate
 from data.transformers.vision.vit_2d.setup_data import setup_data_loaders
-from save_load_checkpoints.transformers.vision.vit_2d.save_checkpoint import save_checkpoint
-from save_load_checkpoints.transformers.vision.vit_2d.load_checkpoint import load_checkpoint
-from training.transformers.vision.vit_2d.training_components.setup_training_components import get_training_components
+from utils.transformers.nlp.checkpointing import save_checkpoint, load_checkpoint
+from training.transformers.vision.setup_training_components import get_training_components
 
 # Set up logger
 from utils.setup_logger import setup_logger
