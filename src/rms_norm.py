@@ -1,3 +1,5 @@
+# TODO: add optimized version of RMSNorm such as nn.RMSNorm or an alt. to xformers RMSNorm.
+
 from configs.setup_env import device, dtype
 
 import torch

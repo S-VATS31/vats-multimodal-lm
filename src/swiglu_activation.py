@@ -1,6 +1,3 @@
-# NOTE: since SwiGLU expects same input, we can create a single module
-# and import it to multiple transformers.
-
 from configs.setup_env import (
     device,
     dtype,
