@@ -3,8 +3,6 @@ from configs.setup_env import (
     dtype,
     use_flash_attn,
     flash_attn_varlen_qkvpacked_func,
-    use_xformers_swiglu,
-    swiglu
 )
 
 import math
@@ -17,6 +15,8 @@ import torch.nn.functional as F
 from torch.amp import autocast
 from torch.utils.checkpoint import checkpoint
 
+from src.rms_norm import RMSNorm
+from src.swiglu_activation import SwiGLUActivation
 from configs.transformers.vision.vit_3d.model_args.model_args_large import ModelArgs
 
 class PatchEmbeddings3D(nn.Module):
@@ -450,35 +450,6 @@ class RoPE3D(nn.Module):
                 )
             
             return self._compute_3d_rope_embeddings(x, grid_shape)
-
-
-class RMSNorm(nn.Module):
-    """Apply RMSNorm to the features dimension.
-
-    Formula:
-        x_norm = (x / sqrt(mean(x**2))) * self.weight
-    
-    Args:
-        d_model (int): Dimensionality of the model's embeddings.
-        eps (float): Small epsilon value to prevent numerical stability.
-    """
-    def __init__(self, d_model: int, eps: float):
-        super().__init__()
-
-        self.d_model = d_model
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(d_model))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Perform forward pass of RMSNorm layer.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape [B, N, d_model].    
-        """
-        with autocast(device_type=device.type, dtype=dtype):
-            return self.weight * (
-                x / (torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True)) + self.eps)
-            )
         
 
 class Attention(nn.Module):
@@ -844,87 +815,6 @@ class Attention(nn.Module):
             return self.w_o(attn_out) # [B, N, d_model]
 
 
-class GatedFFN(nn.Module):
-    """Gated FFN layer with SwiGLU activation.
-
-    Formula:
-        Dropout(SwiGLU(x)) = Dropout(w3 @ (Swish(w1 @ x) * (w2 @ x)))
-        Set bias=False, better empirical results.
-        
-    Args:
-        d_model (int): Dimensionality of the model's embeddings.
-        d_ffn (int): Dimensionality of the FFN.
-        dropout (float): Dropout probability.
-    """
-    def __init__(self, d_model: int, d_ffn: int, dropout: float):
-        super().__init__()
-
-        self.w1 = nn.Linear(d_model, d_ffn, bias=False)
-        self.w2 = nn.Linear(d_model, d_ffn, bias=False)
-        self.w3 = nn.Linear(d_ffn, d_model, bias=False) # output projection matrix
-        self.dropout = nn.Dropout(p=dropout)
-
-    def _optimized_swiglu(self, x: torch.Tensor) -> torch.Tensor:
-        """Optimized SwiGLU via xformers.
-        
-        Args:
-            x (torch.Tensor): Input tensor of shape [B, N, d_model].
-
-        Returns:
-            torch.Tensor: Output tensor of same shape.
-
-        Requirements:
-            xformers import must be succesful.
-            `device` must be cuda.
-            x must live on `device` of cuda.
-            x.dtype must be float16/bfloat16.
-        """
-        with autocast(device_type=device.type, dtype=dtype):
-            # Optimized SwiGLU
-            if (
-                use_xformers_swiglu 
-                and device.type == "cuda"
-                and x.is_cuda
-                and x.dtype in [torch.float16, torch.bfloat16]
-            ):
-                return self.dropout(swiglu(
-                    x.contiguous(), 
-                    self.w1.weight.T, None, 
-                    self.w2.weight.T, None, 
-                    self.w3.weight.T, None
-                ))
-            # Fallback to PyTorch implementation of SwiGLU
-            else:
-                warnings.warn("xformers SwiGLU not available, falling back to PyTorch SwiGLU.")
-                return self._pytorch_swiglu(x)
-    
-    def _pytorch_swiglu(self, x: torch.Tensor) -> torch.Tensor:
-        """PyTorch implementation of SwiGLU, fallback for xformers SwiGLU.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape [B, N, d_model].
-        
-        Returns:
-            torch.Tensor: Output tensor of same shape.
-        """
-        return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
-            
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Perform forward pass of the Gated FFN layer.
-        
-        Args:
-            x (torch.Tensor): Input tensor of shape [B, N, d_model].
-
-        Returns:
-            torch.Tensor: Output tensor of same shape.
-        """
-        with autocast(device_type=device.type, dtype=dtype):
-            assert(
-                x.dim() == 3
-            ), f"x must be a 3 dimensional tensor, got {x.dim()} dimensions"
-
-            return self._optimized_swiglu(x)
-
 class AttentionBlock(nn.Module):
     """Attention block with attention, normalization, dropout, and residuals applied.
     
@@ -994,7 +884,7 @@ class GatedFFNBlock(nn.Module):
     def __init__(self, d_model: int, d_ffn: int, dropout: float, eps: float):
         super().__init__()
 
-        self.gated_ffn = GatedFFN(d_model, d_ffn, dropout)
+        self.gated_ffn = SwiGLUActivation(d_model, d_ffn, dropout)
         self.rms_norm = RMSNorm(d_model, eps)
         self.dropout = nn.Dropout(p=dropout)
 
@@ -1252,3 +1142,14 @@ class VideoTransformer(nn.Module):
         ), f"logits must be a 2 dimensional tensor, got {logits.dim()} dimensions"
 
         return logits # [B, num_classes]
+
+def main():
+    model_args = ModelArgs()
+    model = VideoTransformer(model_args).to(device)
+    x = torch.randn(1, 3, 4, 16, 16).to(device)
+    logits = model(x)
+    return logits
+
+if __name__ == "__main__":
+    logits = main()
+    print(logits.shape)
