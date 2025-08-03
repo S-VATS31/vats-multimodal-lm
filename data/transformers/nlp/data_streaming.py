@@ -13,7 +13,23 @@ from src.transformers.nlp.text_cleaning.text_quality_filter import TextQualityFi
 from utils.setup_logger import setup_logger
 
 # Set up logger
-data_logger = setup_logger(name="data_logger", log_file="data_loading.log", level=logging.INFO)
+data_logger = setup_logger(
+    name="data_logger", 
+    log_file="data_loading.log", 
+    level=logging.INFO
+)
+
+# TODO: support input of mutiple datasets and bool of combination strategy:
+# if combination == "interleave":
+#   *apply HF interleave logic*
+# else:
+#   *apply HF concatenation logic*
+# interleave typically leads to more balanced training
+#
+# TODO: Look more into int16/int32 tokenization instead of int64:
+# in theory we can convert input_ids to int16/int32 before
+# nn.Embedding() or F.cross_entropy()
+# only do this if loading all data into memory (not possible for billions of tokens)
 
 class StreamingTextDataset(IterableDataset):
     """Iterable text dataset for loading large datasets.
@@ -127,7 +143,11 @@ class StreamingTextDataset(IterableDataset):
         
         return batch_dataset["text"]
     
-    def tokenize(self, text: str, model_args: ModelArgs) -> Optional[Dict[str, torch.Tensor]]:
+    def tokenize(
+        self, 
+        text: str, 
+        model_args: ModelArgs
+    ) -> Optional[Dict[str, torch.Tensor]]:
         """Tokenize a single text and format for causal language modeling.
         
         Args:
