@@ -3,8 +3,6 @@ from configs.setup_env import (
     dtype,
     use_flash_attn,
     flash_attn_varlen_qkvpacked_func,
-    use_xformers_swiglu,
-    swiglu
 )
 
 import warnings
@@ -17,6 +15,8 @@ import torch.nn.functional as F
 from torch.amp import autocast
 from torch.utils.checkpoint import checkpoint
 
+from src.rms_norm import RMSNorm
+from src.swiglu_activation import SwiGLUActivation
 from configs.transformers.vision.vit_2d.model_args.model_args_large import ModelArgs
 
 class PatchEmbeddings(nn.Module):
@@ -77,41 +77,6 @@ class PatchEmbeddings(nn.Module):
             ), f"x must have shape of {(B, self.num_patches, self.d_model)}, got {x.shape}"
 
         return x
-
-
-class RMSNorm(nn.Module):
-    """RMSNorm layer applied during GQA/FFN block.
-
-    Args:
-        d_model (int): Dimensionality of the model's input/output representations.
-        eps (float): Small floating point value for preventing division by zero.
-    """
-    def __init__(self, d_model: int, eps: float = 1e-7):
-        super().__init__()
-
-        self.eps = eps
-        self.d_model = d_model
-        self.gamma = nn.Parameter(torch.ones(d_model)) # Scaling factor
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Perform forward pass of the RMSNorm layer.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape [B, T, d_model].
-
-        Returns:
-            torch.Tensor: Normalized output tensor with same shape.
-        """
-        with autocast(device_type=device.type, dtype=dtype):
-            assert (
-                x.dim() == 3
-            ), f"x must have 3 dimensions, got {x.dim()} dimensions."
-            assert (
-                x.size(-1) == self.d_model
-            ), f"x last dimension must be {self.d_model}, got {x.size(-1)}"
-            return self.gamma * (
-                x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
-            )
 
 
 class RoPE(nn.Module):
@@ -575,19 +540,22 @@ class GQABlock(nn.Module):
         d_model (int): Dimensionality of the model's input/output representations.
         num_heads (int): Number of attention heads for queries.
         query_groups (int): Number of key/value groups (heads).
+        eps (float): Epsilon value to maintain numerical stability in RMSNorm.
         rope_module (RoPE): An instance of the RoPE module for applying rotary embeddings.
+        dropout (float): 
     """
     def __init__(
         self, 
         d_model: int, 
         num_heads: int, 
         query_groups: int, 
-        rope_module: RoPE, 
-        dropout: float = 0.15
+        rope_module: RoPE,
+        eps: float,
+        dropout: float,
     ):
         super().__init__()
 
-        self.rms_norm = RMSNorm(d_model)
+        self.rms_norm = RMSNorm(d_model, eps)
         self.attn = GroupedQueryAttention(d_model, num_heads, query_groups, rope_module)
         self.dropout = nn.Dropout(p=dropout)
 
@@ -604,90 +572,20 @@ class GQABlock(nn.Module):
             return x + self.dropout(self.attn(self.rms_norm(x), window_size))
 
 
-class FFN(nn.Module):
-    """Feed forward network with SwiGLU activation.
-
-    Args:
-        d_model (int): Input and output dimension.
-        d_ffn (int): Hidden dimension (usually 4 * d_model).
-        dropout (float): Dropout probability.
-    """
-    def __init__(self, d_model: int, d_ffn: int, dropout: float = 0.15):
-        super().__init__()
-
-        self.linear1 = nn.Linear(d_model, d_ffn, bias=False)
-        self.linear2 = nn.Linear(d_model, d_ffn, bias=False)
-        self.linear3 = nn.Linear(d_ffn, d_model, bias=False) # Output projection
-        self.dropout = nn.Dropout(p=dropout)
-
-    def _optimized_swiglu(self, x: torch.Tensor) -> torch.Tensor:
-        """Optimized SwiGLU activation with the help of xformers.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape [B, T, d_model].
-
-        Returns:
-            torch.Tensor: Output tensor of same shape.
-
-        Requirements:
-
-        """
-        # xformers SwiGLU
-        if (
-            use_xformers_swiglu
-            and device.type == "cuda"
-            and x.dtype in [torch.float16, torch.bfloat16]
-            and x.is_cuda  
-        ):
-            return (
-                self.dropout(swiglu(
-                    x.contiguous(),
-                    self.linear1.weight.T, None,
-                    self.linear2.weight.T, None,
-                    self.linear3.weight.T, None
-                ))
-            )
-        # PyTorch SwiGLU
-        else:
-            warnings.warn("xformers SwiGLU not available, falling back to PyTorch SwiGLU.")
-            return self._pytorch_swiglu(x)
-        
-    def _pytorch_swiglu(self, x: torch.Tensor) -> torch.Tensor:
-        """PyTorch implementation of SwiGLU, fallback for xformers SwiGLU.
-        
-        Args:
-            x (torch.Tensor): Input tensor of shape [B, T, d_model].
-        
-        Returns:
-            torch.Tensor: Output tensor of same shape.
-        """
-        return self.dropout(self.linear3(F.silu(self.linear1(x)) * self.linear2(x)))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Perform forward pass through FFN.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape [B, T, d_model].
-
-        Returns:
-            torch.Tensor: Output tensor of same shape.
-        """
-        with autocast(device_type=device.type, dtype=dtype):
-            return self._optimized_swiglu(x)
-
 class FFNBlock(nn.Module):
     """FFN block which applies RMSNorm, Dropout, and a pass through the FFN.
 
     Args:
         d_model (int): Dimensionality of the model's input/output representations.
         d_ffn (int): Dimensionality of the feed-forward network.
+        eps (float): Small value to maintain numerical stability in RMSNorm.
         dropout (float): Regularizes the model and helps prevent dropout.
     """
-    def __init__(self, d_model: int, d_ffn: int, dropout: float = 0.15):
+    def __init__(self, d_model: int, d_ffn: int, eps: float, dropout: float):
         super().__init__()
 
-        self.rms_norm = RMSNorm(d_model)
-        self.ffn = FFN(d_model, d_ffn)
+        self.rms_norm = RMSNorm(d_model, eps)
+        self.ffn = SwiGLUActivation(d_model, d_ffn, dropout)
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -712,6 +610,7 @@ class TransformerEncoder(nn.Module):
         query_groups (int): Number of key/value groups (heads).
         rope_module (nn.Module): An instance of the RoPE module for applying rotary embeddings.
         d_ffn (int): Dimensionality of the feed-forward network. Typically, d_ffn = 4 * d_model.
+        eps: (float): Small value to maintain numerical stability in RMSNorm.
         dropout (float): Regularizes the model and helps prevent overfitting.
     """
     def __init__(
@@ -721,12 +620,13 @@ class TransformerEncoder(nn.Module):
         query_groups: int,
         rope_module: RoPE,
         d_ffn: int,
-        dropout: float = 0.15
+        eps: float,
+        dropout: float,
     ):
         super().__init__()
 
-        self.attn_block = GQABlock(d_model, num_heads, query_groups, rope_module, dropout)
-        self.ffn_block = FFNBlock(d_model, d_ffn, dropout)
+        self.attn_block = GQABlock(d_model, num_heads, query_groups, rope_module, eps, dropout)
+        self.ffn_block = FFNBlock(d_model, d_ffn, eps, dropout)
 
     def forward(self, x: torch.Tensor, window_size: Tuple[int, int]) -> torch.Tensor:
         """Perform forward pass of the Transformer Encoder.
@@ -777,6 +677,7 @@ class VisionTransformer(nn.Module):
                 query_groups=model_args.query_groups,
                 rope_module=self.rope,
                 d_ffn=model_args.d_ffn,
+                eps=model_args.rms_norm_eps,
                 dropout=model_args.dropout
             ) for _ in range(model_args.num_layers)
         ])
@@ -860,3 +761,15 @@ class VisionTransformer(nn.Module):
             ), f"logits must be a 2 dimensional tensor, got {logits.dim()}"
 
             return logits # [B, num_classes]
+
+def main():
+    model_args = ModelArgs()
+    model = VisionTransformer(model_args).to(device)
+    B, C, H, W = 4, 3, 384, 384
+    x = torch.randn(B, C, H, W).to(device)
+    logits = model(x)
+    return logits
+
+if __name__ == "__main__":
+    logits = main()
+    print(logits.shape) # torch.Size([4, 1000])
