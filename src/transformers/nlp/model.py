@@ -759,9 +759,7 @@ class Attention(nn.Module):
             return self.w_o(out), cache_out
 
 
-# TODO: add assertions to all MoE components
-
-class SwiGLUExpert(nn.Module):  
+class SwiGLUExpert(nn.Module):
     """SwiGLU expert layer.
 
     Args:
@@ -872,42 +870,73 @@ class TopKRouter(nn.Module):
         # Set up router (projects from d_model to num_experts)
         self.router = nn.Linear(d_model, num_experts)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:  
+    def forward(
+        self, 
+        x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:  
         """Forward pass of the routing layer.
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]. A tuple containing:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                 - torch.Tensor: Tensor containing gating scores.
                 - Torch.Tensor: Indices of gating scores.
                 - torch.Tensor: Tensor containing auxiliary loss.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
-            B, T, d_model = x.shape
+            assert (
+                x.dim() == 3
+            ), f"x must have 3 dimensions, got {x.dim()}"
+            B, T, _ = x.shape
 
             # Flatten for efficiency
-            x_flattened = x.view(-1, d_model) # [B * T, d_model]
+            x_flattened = x.view(-1, self.d_model) # [B * T, d_model]
+            assert (
+                x_flattened.shape == (B * T, self.d_model)
+            ), f"x must have shape of {(B * T, self.d_model)}"
 
             # Compute logits
             logits = self.router(x_flattened) # [B * T, num_experts]
+            assert (
+                logits.shape == (B * T, self.num_experts)
+            ), f"logits must have shape of {(B * T, self.num_experts)}, got {logits.shape}"
 
             # Get probabilities
             prob_scores = F.softmax(logits, dim=-1) # [B * T, num_experts]
+            assert (
+                prob_scores.shape == (B * T, self.num_experts)
+            ), f"logits must have shape of {(B * T, self.num_experts)}, got {prob_scores.shape}"
 
             # Get top-k experts
             top_k_values, top_k_indices = torch.topk(prob_scores, self.top_k, dim=-1) # Both: [B * T, top_k]
+            assert (
+                top_k_values.shape == (B * T, self.top_k)
+            ), f"top_k_values must have shape of {(B * T, self.top_k)}, got {top_k_values.shape}"
+            assert (
+                top_k_indices.shape == (B * T, self.top_k)
+            ), f"top_k_indices must have shape of {(B * T, self.top_k)}, got {top_k_indices.shape}"
 
             # Get weights
             top_k_weights = top_k_values / torch.sum(top_k_values, dim=-1, keepdim=True)
+            assert (
+                top_k_weights.shape == (B * T, self.top_k)
+            ), f"top_k_weights must have shape of {(B * T, self.top_k)}"
 
             # Reshape
             expert_weights = top_k_weights.view(B, T, self.top_k)
             expert_indices = top_k_indices.view(B, T, self.top_k)
 
+            assert (
+                expert_weights.shape == (B, T, self.top_k)
+            ), f"expert_weights must have shape of {(B, T, self.top_k)}, got {expert_weights.shape}"
+            assert (
+                expert_indices.shape == (B, T, self.top_k)
+            ), f"expert_indices must have shape of {(B, T, self.top_k)}, got {expert_indices.shape}"
+
             # Compute auxiliary loss
-            aux_loss = torch.tensor(0.0).to(x.device)
+            aux_loss = torch.tensor(0.0).to(x.device) # Initialize aux loss
             if self.use_aux_loss and self.training:
                 aux_loss = self._compute_aux_loss(prob_scores)
 
@@ -922,6 +951,7 @@ class TopKRouter(nn.Module):
         Returns:
             cv (torch.Tensor): Coefficient of variation.
         """
+        # [B * T, num_experts]
         experts = prob_scores.sum(dim=0) # Sum over total tokens
         experts_fractions = experts / experts.sum()
 
@@ -929,7 +959,6 @@ class TopKRouter(nn.Module):
         cv = experts_fractions.std(unbiased=False) / experts_fractions.mean()
 
         return cv
-
 
 class MoELayer(nn.Module):
     """Mixture of Experts layer.
@@ -981,11 +1010,14 @@ class MoELayer(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]. A tuple containing:
+            Tuple[torch.Tensor, torch.Tensor]:
                 - out: Ouput tensor of shape [B, T, d_model].
                 - aux_loss: Auxiliary loss.
         """
-        B, T, d_model = x.shape
+        assert (
+            x.dim() == 3
+        ), f"x must be a 3 dimensional tensor, got {x.dim()}"
+        B, T, _ = x.shape
 
         # Apply RMSNorm
         x = self.rms_norm(x)
@@ -993,8 +1025,24 @@ class MoELayer(nn.Module):
         # Get routers
         expert_weights, expert_indices, aux_loss = self.router(x)
 
+        # Check if aux_loss being used
+        if aux_loss.item() == 0.0:
+            warnings.warn(
+                "Auxiliary loss not being used. To use auxiliary loss set use_aux_loss to True."
+            )
+
+        assert (
+           expert_weights.shape == (B, T, self.top_k)
+        ), f"expert_weights must have shape of {(B, T, self.top_k)}, got {expert_weights.shape}"
+        assert (
+            expert_indices.shape == (B, T, self.top_k)
+        ), f"expert_indices must have shape of {(B, T, self.top_k)}, got {expert_indices.shape}"
+
         # Flatten for efficiency
-        x_flattened = x.view(-1, d_model) # [B * T, d_model]
+        x_flattened = x.view(-1, self.d_model) # [B * T, d_model]
+        assert (
+            x_flattened.shape == (B * T, self.d_model)
+        ), f"x_flattened must have shape of {(B * T, self.d_model)}"
 
         # Initialize output
         out = torch.zeros_like(x_flattened)
@@ -1002,6 +1050,9 @@ class MoELayer(nn.Module):
         # Process all experts
         for expert_id in range(self.num_experts):
             expert_mask = (expert_indices == expert_id) # [B, T, top_k]
+            assert (
+                expert_mask.shape == (B, T, self.top_k)
+            ), f"expert_mask must have shape of {(B, T, self.top_k)}, got {expert_mask.shape}"
 
             if expert_mask.any():
                 # Get positions where this expert is used
@@ -1026,13 +1077,16 @@ class MoELayer(nn.Module):
                     expert_output = self.experts[expert_id](expert_input) # [num_matches, d_model]
 
                     # Apply weights and accumulate
-                    weighted_output = expert_output * expert_weight_vals.unsqueeze(-1) # [num_matches, d_model]
+                    weighted_output = expert_output * expert_weight_vals[..., None] # [num_matches, d_model]
 
                     # Add to output
                     out[flat_indices] += weighted_output
 
-        # Reshape back
-        out = out.view(B, T, d_model)
+        # Reshape back to [B, T, d_model]
+        out = out.view(B, T, self.d_model)
+        assert (
+            out.shape == (B, T, self.d_model)
+        ), f"out must have shape of {(B, T, self.d_model)}, got {out.shape}"
 
         return out, aux_loss
 
@@ -1315,7 +1369,7 @@ class Transformer(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.LongTensor,
         padding_mask: Optional[torch.Tensor] = None,
         use_cache: bool = False
     ) -> Tuple[torch.Tensor, Optional[List[Dict[str, torch.Tensor]]], torch.Tensor]:
@@ -1334,8 +1388,13 @@ class Transformer(nn.Module):
                 - Sum of auxiliary losses from all MoE layers.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
-            # Ensure input_ids.dtype == torch.int64 for embeddings
-            input_ids = input_ids.to(torch.int64)
+            assert (
+                input_ids.dim() == 2
+            ), f"input_ids must have 2 dimensions, got {input_ids.dim()}"
+            # Ensure input_ids are int64 for nn.Embedding() layer
+            if input_ids.dtype != torch.int64:
+                warnings.warn(f"got input_ids of {input_ids.dtype}, casting to int64")
+                input_ids = input_ids.to(torch.int64)
 
             # Ensure padding mask/input_ids are the same shape
             if padding_mask is not None:
@@ -1381,7 +1440,7 @@ class Transformer(nn.Module):
                         self.model_args.window_size,
                         padding_mask,
                         self.kv_cache,
-                        i,
+                        i,  # layer_idx
                         use_cache,
                         use_reentrant=False
                     )
