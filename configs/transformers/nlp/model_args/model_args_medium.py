@@ -37,7 +37,7 @@ class ModelArgs:
     """
     d_model: int = 1440
     num_heads: int = 24
-    query_groups: int = 12
+    query_groups: int = 8
     d_ffn: int = 5760
     num_layers: int = 20
     dropout: float = 0.2

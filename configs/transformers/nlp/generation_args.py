@@ -18,7 +18,7 @@ class GenerationArgs:
         return_only_new_tokens (bool): Whether to return only generated tokens or prompt + generated tokens.
         generation_frequency (int): Test generation every N tokens seen to see if model can learn well.
     """
-    max_new_tokens: int = 1024
+    max_new_tokens: int = 256
     temperature: float = 0.7
     top_k: int = 50
     top_p: float = 0.95
