@@ -15,19 +15,6 @@ import torch.nn.functional as F
 
 from src.rms_norm import RMSNorm
 
-# TODO: split attention module into 4 main functions:
-# - extend_kv_heads() -> complete
-# - _optimized_attention() -> uncomplete
-# - _fallback_attention() -> uncomplete
-# - forward() -> update forward to support new attn funcs
-#
-# TODO: use left_window: int, and right_window: int instead of window_size: Tuple[int, int]
-# this ensures we can do:
-# if causal:
-#   right_window = 0
-# can't be done with tuples as they are mutable objects and doing list(window_size) can
-# possibly introduce errors
-
 class RoPE(nn.Module):
     """Rotary positional embeddings (RoPE) to be applied to the query and key vectors.
 
@@ -307,13 +294,19 @@ class Attention(nn.Module):
         num_heads (int): Number of attention heads for KV vectors, shared across grouped query heads in GQA.
         query_groups (int): Number of query groups that partition the queries into subsets.
         theta (float): Exponential base of the inverse frequency.
+        softmax_scale (float): Float to scale the attention scores by.
+        use_proj_bias (bool): Whether to use bias in q, k, v, o projections.
+        use_qkv_proj (bool): Whether to use fused qkv proj or individual q, k, v projections.
     """
     def __init__(
         self, 
         d_model: int, 
         num_heads: int, 
         query_groups: int, 
-        theta: float
+        theta: float,
+        softmax_scale: float,
+        use_proj_bias: bool = False,
+        use_qkv_proj: bool = True,
     ):
         super().__init__()
 
@@ -322,6 +315,8 @@ class Attention(nn.Module):
         self.query_groups = query_groups
         self.head_dim = d_model // num_heads
         self.heads_per_group = num_heads // query_groups
+        self.softmax_scale = softmax_scale
+        self.use_qkv_proj = use_qkv_proj
 
         if d_model % num_heads != 0:
             raise ValueError(
@@ -333,18 +328,23 @@ class Attention(nn.Module):
                 )
 
         # QKV projection matrix
-        self.w_qkv = nn.Linear(
-            d_model,
-            num_heads * self.head_dim + 2 * query_groups * self.head_dim,
-            bias=False,
-            dtype=dtype
-        ).to(device)
+        if use_qkv_proj:
+            self.w_qkv = nn.Linear(
+                d_model,
+                num_heads * self.head_dim + 2 * query_groups * self.head_dim,
+                bias=use_proj_bias,
+                dtype=dtype
+            ).to(device)
+        else:
+            self.w_q = nn.Linear(d_model, num_heads * self.head_dim, dtype=dtype, bias=use_proj_bias)
+            self.w_k = nn.Linear(d_model, self.query_groups * self.head_dim, dtype=dtype, bias=use_proj_bias)
+            self.w_v = nn.Linear(d_model, self.query_groups * self.head_dim, dtype=dtype, bias=use_proj_bias)
 
         # O projection matrix
         self.w_o = nn.Linear(
             d_model,
             d_model,
-            bias=False,
+            bias=use_proj_bias,
             dtype=dtype
         ).to(device)
 
@@ -363,7 +363,7 @@ class Attention(nn.Module):
             input_tensor (torch.Tensor): Key or value tensor to be repeated.
             heads_per_group (int): Heads per group computed as num_heads // query_groups.
             dim_to_repeat (int): Dimension to of the input tensor to be repeated.
-            use_mqa (bool): Apply Multi-Query attention instead of GQA.
+            use_mqa (bool): Whether to Multi-Query attention instead of GQA.
                 Constraints: query_groups == 1.
 
         Returns:
@@ -372,7 +372,7 @@ class Attention(nn.Module):
         if use_mqa and kv_tensor.size(kv_heads_dim) == 1:
             warnings.warn(
                 "Using multi-query attention, consider switching to GQA for more expressiveness"
-                )
+            )
             # For MQA, we return tensor as is
             return kv_tensor
         # For GQA, we expand kv heads and then return tensor
@@ -381,18 +381,21 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        window_size: Tuple[int, int],
+        left_window: int,
+        right_window: int,
         causal: bool = True,
         padding_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCache] = None,
         layer_idx: Optional[int] = None,
-        use_cache: bool = False
+        use_cache: bool = False,
+        use_mqa: bool = False,
     ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
         """Forward pass for GQA layer.
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, D].
-            window_size (Tuple[int, int]): Window size for sliding window attention
+            left_window (int): Left window for SWA.
+            right_window (int): Right window for SWA.
             causal (bool): To apply causal masking or not.
             padding_mask (torch.Tensor, optional): Padding mask of shape [B, T] where
                 True indicates valid tokens and False indicates padding tokens.
@@ -413,61 +416,78 @@ class Attention(nn.Module):
             Flash Attention import must be successful.
             `device` must be cuda.
             q, k, v tensors must have dtype of float16 or bfloat16.
+            q, k, v tensors must be on device of cuda.
 
         NOTE: FLASH ATTENTION 2 + SWA HAS NOT BEEN TESTED DUE TO HARDWARE LIMITATIONS.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
-            B, T, D = x.shape
-            if x.shape != (B, T, D):
+            B, T, _ = x.shape
+            if x.shape != (B, T, self.d_model):
                 raise ValueError(f"Expected x to have shape [B, T, d_model], got {x.shape}")
             if T == 0:
                 # Return empty tensor if sequence length is 0
-                return torch.empty(B, 0, D, device=x.device, dtype=x.dtype), None
+                return torch.empty(B, 0, self.d_model, device=x.device, dtype=x.dtype), None
 
-            # Project QKV
-            qkv = self.w_qkv(x) # [B, T, num_heads * head_dim + 2 * query_groups * head_dim]
-            assert (
-                qkv.shape == (B, T, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim)
-            ), (
-                f"qkv must have shape of {(B, T, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim)} "
-                f"got, {qkv.shape}"
-            )
+            if self.use_qkv_proj:
+                # Project QKV
+                qkv = self.w_qkv(x) # [B, T, num_heads * head_dim + 2 * query_groups * head_dim]
+                assert (
+                    qkv.shape == (B, T, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim)
+                ), (
+                    f"qkv must have shape of {(B, T, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim)} "
+                    f"got, {qkv.shape}"
+                )
 
-            # q shape: [B, T, num_heads * head_dim]
-            # kv shape: [B, T, 2 * query_groups * head_dim]
-            q, kv = torch.split(qkv, [self.num_heads * self.head_dim, 2 * self.query_groups * self.head_dim], dim=-1)
-            assert (
-                q.shape == (B, T, self.num_heads * self.head_dim)
-            ), f"q must have shape of {(B, T, self.num_heads * self.head_dim)}, got {q.shape}"
-            assert (
-                kv.shape == (B, T, 2 * self.query_groups * self.head_dim)
-            ), f"kv must have shape of {(B, T, 2 * self.query_groups * self.head_dim)}, got {kv.shape}"
+                # q shape: [B, T, num_heads * head_dim]
+                # kv shape: [B, T, 2 * query_groups * head_dim]
+                q, kv = torch.split(qkv, [self.num_heads * self.head_dim, 2 * self.query_groups * self.head_dim], dim=-1)
+                assert (
+                    q.shape == (B, T, self.num_heads * self.head_dim)
+                ), f"q must have shape of {(B, T, self.num_heads * self.head_dim)}, got {q.shape}"
+                assert (
+                    kv.shape == (B, T, 2 * self.query_groups * self.head_dim)
+                ), f"kv must have shape of {(B, T, 2 * self.query_groups * self.head_dim)}, got {kv.shape}"
 
-            # k shape: [B, T, query_groups * head_dim]
-            # v shape: [B, T, query_groups * head_dim]
-            k, v = torch.chunk(kv, 2, dim=-1)
-            assert (
-                k.shape == (B, T, self.query_groups * self.head_dim)
-            ), f"k must have shape of {(B, T, self.query_groups * self.head_dim)}, got {k.shape}"
-            assert (
-                v.shape == (B, T, self.query_groups * self.head_dim)
-            ), f"v must have shape of {(B, T, self.query_groups * self.head_dim)}, got {v.shape}"
+                # k shape: [B, T, query_groups * head_dim]
+                # v shape: [B, T, query_groups * head_dim]
+                k, v = torch.chunk(kv, 2, dim=-1)
+                assert (
+                    k.shape == (B, T, self.query_groups * self.head_dim)
+                ), f"k must have shape of {(B, T, self.query_groups * self.head_dim)}, got {k.shape}"
+                assert (
+                    v.shape == (B, T, self.query_groups * self.head_dim)
+                ), f"v must have shape of {(B, T, self.query_groups * self.head_dim)}, got {v.shape}"
 
-            # Assertions before reshaping
-            assert (
-                q.shape == (B, T, self.num_heads * self.head_dim)
-            ), f"q must have shape {(B, T, self.num_heads * self.head_dim)}, got {q.shape}"
-            assert (
-                k.shape == (B, T, self.query_groups * self.head_dim)
-            ), f"k must have shape {(B, T, self.query_groups * self.head_dim)}, got {k.shape}"
-            assert (
-                v.shape == (B, T, self.query_groups * self.head_dim)
-            ), f"v must have shape {(B, T, self.query_groups * self.head_dim)}, got {v.shape}"
+                # Assertions before reshaping
+                assert (
+                    q.shape == (B, T, self.num_heads * self.head_dim)
+                ), f"q must have shape {(B, T, self.num_heads * self.head_dim)}, got {q.shape}"
+                assert (
+                    k.shape == (B, T, self.query_groups * self.head_dim)
+                ), f"k must have shape {(B, T, self.query_groups * self.head_dim)}, got {k.shape}"
+                assert (
+                    v.shape == (B, T, self.query_groups * self.head_dim)
+                ), f"v must have shape {(B, T, self.query_groups * self.head_dim)}, got {v.shape}"
+            else:
+                warnings.warn(
+                    "Using seperate projections, set use_qkv_proj=True to use single qkv projection."
+                )
+                q, k, v = self.w_q(x), self.w_k(x), self.w_v(x)
+
+                assert (
+                    q.shape == (B, T, self.d_model)
+                ), f"q must have shape of {(B, T, self.d_model)}, got {q.shape}"
+                assert (
+                    k.shape == (B, T, self.query_groups * self.head_dim)
+                ), f"k must have shape of {((B, T, self.query_groups * self.head_dim))}, got {k.shape}"
+                assert (
+                    v.shape == (B, T, self.query_groups * self.head_dim)
+                ), f"v must have shape of {(B, T, self.query_groups * self.head_dim)}, got {v.shape}"
 
             # Reshape into 4D tensors for GQA
-            q = q.contiguous().view(B, T, self.num_heads, self.head_dim) # [B, T, num_heads, head_dim]
-            k = k.contiguous().view(B, T, self.query_groups, self.head_dim) # [B, T, query_groups, head_dim]
-            v = v.contiguous().view(B, T, self.query_groups, self.head_dim) # [B, T, query_groups, head_dim]
+            q = q.view(B, T, self.num_heads, self.head_dim) # [B, T, num_heads, head_dim]
+            k = k.view(B, T, self.query_groups, self.head_dim) # [B, T, query_groups, head_dim]
+            v = v.view(B, T, self.query_groups, self.head_dim) # [B, T, query_groups, head_dim]
 
             # Apply RoPE
             q = self.rope(q) # [B, T, num_heads, head_dim]
@@ -494,9 +514,19 @@ class Attention(nn.Module):
                 # Update cache using only the T most recent tokens
                 kv_cache.update(layer_idx, k[:, -T:], v[:, -T:])
             
-            # Extend KV tensors (if query_groups==1, no expansion is done)
-            k = self._extend_kv_heads(kv_tensor=k, heads_per_group=self.heads_per_group, kv_heads_dim=2)
-            v = self._extend_kv_heads(kv_tensor=v, heads_per_group=self.heads_per_group, kv_heads_dim=2)
+            # Extend KV tensors (if query_groups==1 and use_mqa=True, no expansion is done)
+            k = self._extend_kv_heads(
+                kv_tensor=k,
+                heads_per_group=self.heads_per_group, 
+                kv_heads_dim=2, 
+                use_mqa=use_mqa
+            )
+            v = self._extend_kv_heads(
+                kv_tensor=v, 
+                heads_per_group=self.heads_per_group, 
+                kv_heads_dim=2, 
+                use_mqa=use_mqa
+            )
 
             # Assert extension of kv heads worked or MQA was succesful
             assert (
@@ -506,17 +536,9 @@ class Attention(nn.Module):
                 v.size(2) == self.num_heads or k.size(2) == 1
             ), f"k.size(2) must be {self.num_heads} or 1, got {k.size(2)}"
 
-            # TODO: when left_window, right_window are in place remove this assertion and do
-            # if causal:
-            #   right_window = 0
-
-            # Assert right window is 0 for causal LM
-            assert (
-                window_size[1] == 0
-            ), (
-                f"right window must be equal to 0, got {window_size[1]}. "
-                f"set window_size to (left, 0)"
-            )
+            # for causal LM, we want right window to be 0
+            if causal:
+                right_window = 0
 
             # FlashAttention 2 - requires CUDA/flash attn available/bf16 or fp16
             if (
@@ -524,6 +546,7 @@ class Attention(nn.Module):
                 and q.dtype in [torch.float16, torch.bfloat16]
                 and k.dtype in [torch.float16, torch.bfloat16]
                 and v.dtype in [torch.float16, torch.bfloat16]
+                and q.is_cuda and k.is_cuda and v.is_cuda
             ):
                 qkv_packed = torch.stack([q, k, v], dim=3).contiguous() # [B, T, num_heads, 3, head_dim]
                 assert (
@@ -580,7 +603,7 @@ class Attention(nn.Module):
                     
                     assert (
                         qkv_packed.shape == (B * T, 3, self.num_heads, self.head_dim)
-                    ), f"qkv_packed must have shape {(B*T, 3, self.num_heads, self.head_dim)}, got {qkv_packed.shape}"
+                    ), f"qkv_packed must have shape {(B * T, 3, self.num_heads, self.head_dim)}, got {qkv_packed.shape}"
                     assert (
                         qkv_packed.is_contiguous()
                     ), "qkv_packed must be contiguous"
@@ -625,8 +648,8 @@ class Attention(nn.Module):
                     cu_seqlens,
                     max_seqlen,
                     causal=causal,
-                    softmax_scale=1.0 / (math.sqrt(self.head_dim)),
-                    window_size=window_size,
+                    softmax_scale=self.softmax_scale,
+                    window_size=(left_window, right_window),
                 ) # [B * T, num_heads, head_dim]
 
                 assert (
@@ -643,10 +666,10 @@ class Attention(nn.Module):
                     ).to(out.device)
                     # Update valid and padded token positions where valid_tokens is a boolean tensor.
                     full_out[valid_tokens] = out
-                    out = full_out.view(B, T, D) # Reshape output to [B, T, d_model]
+                    out = full_out.view(B, T, self.d_model) # Reshape output to [B, T, d_model]
                 else:
                     # If no padding, reshape right away
-                    out = out.view(B, T, D)
+                    out = out.view(B, T, self.d_model)
 
             # Fallback to PyTorch SPDA if no cuda
             else:
@@ -723,13 +746,14 @@ class Attention(nn.Module):
                     q, k, v,
                     attn_mask=attn_mask,
                     is_causal=causal if padding_mask is None else False,
+                    scale=self.softmax_scale
                 ) # [B, num_heads, T, head_dim]
                 assert (
                     out.shape == (B, self.num_heads, T, self.head_dim)
                 ), f"out must have shape {(B, self.num_heads, T, self.head_dim)}, got {out.shape}"
 
                 # [B, num_heads, T, head_dim] -> [B, T, d_model]
-                out = out.transpose(1, 2).contiguous().view(B, T, D)
+                out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
                 assert (
                     out.shape == (B, T, self.d_model)
                 ), f"out must have shape {(B, T, self.d_model)}, got {out.shape}"
@@ -748,6 +772,9 @@ class AttentionBlock(nn.Module):
         d_model (int): Dimensionality of the model's embeddings.
         num_heads (int): Number of attention heads for KV vectors, shared across grouped query heads in GQA.
         query_groups (int): Number of query groups that partition the queries into subsets.
+        softmax_scale (float): Float to scale the attention scores by.
+        use_proj_bias (bool): Whether to use bias in q, k, v, o projections.
+        use_qkv_proj (bool): Whether to use fused qkv proj or individual q, k, v projections.
         dropout (float): Probability that model components will be randomly dropped out.
         theta (float): Exponential base of the inverse frequency.
         eps (float): Small epsilon value to ensure numerical stability.
@@ -757,24 +784,39 @@ class AttentionBlock(nn.Module):
         d_model: int,
         num_heads: int,
         query_groups: int,
+        softmax_scale: float,
+        use_proj_bias: bool,
+        use_qkv_proj: bool,
         dropout: float,
         theta: float,
         eps: float,
     ):
         super().__init__()
 
-        self.rms_norm = RMSNorm(d_model, eps)
-        self.attn = Attention(d_model, num_heads, query_groups, theta)
         self.dropout = nn.Dropout(p=dropout)
+        self.rms_norm = RMSNorm(d_model, eps)
+        self.attn = Attention(
+            d_model=d_model, 
+            num_heads=num_heads, 
+            query_groups=query_groups, 
+            theta=theta, 
+            softmax_scale=softmax_scale, 
+            use_proj_bias=use_proj_bias, 
+            use_qkv_proj=use_qkv_proj
+        )
+
 
     def forward(
         self,
         x: torch.Tensor,
-        window_size: Tuple[int, int],
+        left_window: int,
+        right_window: int,
+        causal: bool = True,
         padding_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCache] = None,
         layer_idx: Optional[int] = None,
-        use_cache: bool = False
+        use_cache: bool = False,
+        use_mqa: bool = False
     ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
         """Forward pass of the Attention Block.
 
@@ -793,12 +835,15 @@ class AttentionBlock(nn.Module):
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
             attn_out, cache_out = self.attn(
-                self.rms_norm(x),
-                window_size,
+                x=self.rms_norm(x),
+                left_window=left_window,
+                right_window=right_window,
+                causal=causal,
                 padding_mask=padding_mask,
                 kv_cache=kv_cache,
                 layer_idx=layer_idx,
-                use_cache=use_cache
+                use_cache=use_cache,
+                use_mqa=use_mqa
             )
             return x + self.dropout(attn_out), cache_out
         
