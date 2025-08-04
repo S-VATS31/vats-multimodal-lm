@@ -8,97 +8,10 @@ from torch.amp import autocast
 from torch.utils.checkpoint import checkpoint
 
 from src.rms_norm import RMSNorm
-from src.swiglu_activation import SwiGLUActivation
+from src.transformers.vision.ffn_block import FFNBlock
+from src.transformers.vision.vit_2d.patch_embeddings2d import PatchEmbeddings2D
 from src.transformers.vision.vit_2d.optimized_attention import GQABlock, RoPE
 from configs.transformers.vision.vit_2d.model_args.model_args_large import ModelArgs
-
-class PatchEmbeddings(nn.Module):
-    """Patch Embeddings using Conv2d for Vision Transformers.
-
-    Args:
-        img_size (int): Height and width of the image (assumed square).
-        patch_size (int): Height and width of each patch (assumed square).
-        C_in (int): Number of input channels.
-        d_model (int): Dimension of output embeddings.
-    """
-    def __init__(self, img_size: int, patch_size: int, C_in: int, d_model: int):
-        super().__init__()
-
-        if img_size % patch_size != 0:
-            raise ValueError("img_size must be divisible by patch_size")
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.num_patches = (img_size // patch_size) ** 2
-        self.d_model = d_model
-
-        # Patch projection
-        self.proj = nn.Conv2d(C_in, d_model, kernel_size=patch_size, stride=patch_size)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with patch projection.
-
-        Args:
-            x (torch.Tensor): [B, C, H, W] input image tensor.
-
-        Returns:
-            torch.Tensor: [B, num_patches, d_model].
-        """
-        with autocast(device_type=device.type, dtype=dtype):
-            assert (
-                x.dim() == 4
-            ), f"x must have 4 dimensions, got {x.dim()} dimensions"
-
-            # Get height/width of image
-            B, _, H, W = x.shape
-            if H != self.img_size or W != self.img_size:
-                raise ValueError(f"Expected input of size {self.img_size}x{self.img_size}, got {H}x{W}")
-            
-            # Project patches
-            x = self.proj(x) # [B, d_model, H/P, W/P]
-            assert (
-                x.shape == (B, self.d_model, H / self.patch_size, W / self.patch_size)
-            ), f"x must have shape of {(B, self.d_model, H / self.patch_size, W / self.patch_size)}, got {x.shape}"
-
-            x = x.flatten(2) # [B, d_model, num_patches]
-            assert (
-                x.shape == (B, self.d_model, self.num_patches)
-            ), f"x must have shape of {(B, self.d_model, self.num_patches)}, got {x.shape}"
-
-            x = x.transpose(1, 2) # [B, num_patches, d_model]
-            assert (
-                x.shape == (B, self.num_patches, self.d_model)
-            ), f"x must have shape of {(B, self.num_patches, self.d_model)}, got {x.shape}"
-
-        return x
-
-class FFNBlock(nn.Module):
-    """FFN block which applies RMSNorm, Dropout, and a pass through the FFN.
-
-    Args:
-        d_model (int): Dimensionality of the model's input/output representations.
-        d_ffn (int): Dimensionality of the feed-forward network.
-        eps (float): Small value to maintain numerical stability in RMSNorm.
-        dropout (float): Regularizes the model and helps prevent dropout.
-    """
-    def __init__(self, d_model: int, d_ffn: int, eps: float, dropout: float):
-        super().__init__()
-
-        self.rms_norm = RMSNorm(d_model, eps)
-        self.ffn = SwiGLUActivation(d_model, d_ffn, dropout)
-        self.dropout = nn.Dropout(p=dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through FFN Block.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape [B, T, d_model].
-
-        Returns:
-            torch.Tensor: Output tensor with RMSNorm, FFN, Dropout, and residuals applied.
-        """
-        with autocast(device_type=device.type, dtype=dtype):
-            return x + self.dropout(self.ffn(self.rms_norm(x)))
-
 
 class TransformerEncoder(nn.Module):
     """Encoder block where attention block and FFN blocks are stacked.
@@ -152,7 +65,7 @@ class VisionTransformer(nn.Module):
         self.model_args = model_args
 
         # Patch embeddings
-        self.patch_embeddings = PatchEmbeddings(
+        self.patch_embeddings = PatchEmbeddings2D(
             img_size=model_args.img_size,
             patch_size=model_args.patch_size,
             C_in=model_args.C_in,
