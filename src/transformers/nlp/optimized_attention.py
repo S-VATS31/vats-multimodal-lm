@@ -20,6 +20,13 @@ from src.rms_norm import RMSNorm
 # - _optimized_attention() -> uncomplete
 # - _fallback_attention() -> uncomplete
 # - forward() -> update forward to support new attn funcs
+#
+# TODO: use left_window: int, and right_window: int instead of window_size: Tuple[int, int]
+# this ensures we can do:
+# if causal:
+#   right_window = 0
+# can't be done with tuples as they are mutable objects and doing list(window_size) can
+# possibly introduce errors
 
 class RoPE(nn.Module):
     """Rotary positional embeddings (RoPE) to be applied to the query and key vectors.
@@ -498,6 +505,10 @@ class Attention(nn.Module):
             assert (
                 v.size(2) == self.num_heads or k.size(2) == 1
             ), f"k.size(2) must be {self.num_heads} or 1, got {k.size(2)}"
+
+            # TODO: when left_window, right_window are in place remove this assertion and do
+            # if causal:
+            #   right_window = 0
 
             # Assert right window is 0 for causal LM
             assert (
