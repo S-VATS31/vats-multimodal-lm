@@ -20,6 +20,9 @@ class TransformerBlock(nn.Module):
         d_model (int): Dimensionality of the model's embeddings.
         num_heads (int): Number of attention heads for KV vectors, shared across grouped query heads in GQA.
         query_groups (int): Number of query groups that partition the queries into subsets.
+        softmax_scale (float): Float to scale the attention scores by.
+        use_proj_bias (bool): Whether to use bias in q, k, v, o projections.
+        use_qkv_proj (bool): Whether to use fused qkv proj or individual q, k, v projections.
         d_ffn (int): Dimensionality of the feed forward network.
         dropout (float): Probability that model components will be randomly dropped out.
         num_experts (int): Number of feed forward networks in the MoE layer.
@@ -32,6 +35,9 @@ class TransformerBlock(nn.Module):
         d_model: int,
         num_heads: int,
         query_groups: int,
+        softmax_scale: float,
+        use_proj_bias: bool,
+        use_qkv_proj: bool,
         d_ffn: int,
         dropout: float,
         num_experts: int,
@@ -41,17 +47,37 @@ class TransformerBlock(nn.Module):
     ):
         super().__init__()
 
-        self.attn_block = AttentionBlock(d_model, num_heads, query_groups, dropout, theta, eps)
-        self.moe_block = MoEBlock(d_model, d_ffn, dropout, num_experts, top_k, eps)
+        self.attn_block = AttentionBlock(
+            d_model=d_model, 
+            num_heads=num_heads, 
+            query_groups=query_groups,
+            softmax_scale=softmax_scale,
+            use_proj_bias=use_proj_bias,
+            use_qkv_proj=use_qkv_proj,
+            dropout=dropout, 
+            theta=theta, 
+            eps=eps
+        )
+        self.moe_block = MoEBlock(
+            d_model=d_model, 
+            d_ffn=d_ffn, 
+            dropout=dropout, 
+            num_experts=num_experts, 
+            top_k=top_k, 
+            eps=eps
+        )
 
     def forward(
         self,
         x: torch.Tensor,
-        window_size: Tuple[int, int],
+        left_window: int,
+        right_window: int,
+        causal: bool = True,
         padding_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCache] = None,
         layer_idx: Optional[int] = None,
-        use_cache: bool = False
+        use_cache: bool = False,
+        use_mqa: bool = False,
     ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]], torch.Tensor]:
         """Forward pass of the Transformer block.
 
@@ -70,16 +96,19 @@ class TransformerBlock(nn.Module):
                 - Auxiliary loss from the MoE layer.
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
-            x, cache_out = self.attn_block(
-                x,
-                window_size,
+            attn_out, cache_out = self.attn_block(
+                x=x,
+                left_window=left_window,
+                right_window=right_window,
+                causal=causal,
                 padding_mask=padding_mask,
                 kv_cache=kv_cache,
                 layer_idx=layer_idx,
-                use_cache=use_cache
+                use_cache=use_cache,
+                use_mqa=use_mqa
             )
-            x, aux_loss = self.moe_block(x)
-            return x, cache_out, aux_loss
+            moe_out, aux_loss = self.moe_block(attn_out)
+            return moe_out, cache_out, aux_loss
 
 
 class Transformer(nn.Module):
@@ -99,15 +128,18 @@ class Transformer(nn.Module):
         # Stack transformer blocks with MoE
         self.layers = nn.ModuleList([
             TransformerBlock(
-                model_args.d_model,
-                model_args.num_heads,
-                model_args.query_groups,
-                model_args.d_ffn,
-                model_args.dropout,
-                model_args.num_experts,
-                model_args.top_k,
-                model_args.rope_base,
-                model_args.rms_norm_eps,
+                d_model=model_args.d_model,
+                num_heads=model_args.num_heads,
+                query_groups=model_args.query_groups,
+                softmax_scale=model_args.softmax_scale,
+                use_proj_bias=model_args.use_proj_bias,
+                use_qkv_proj=model_args.use_qkv_proj,
+                d_ffn=model_args.d_ffn,
+                dropout=model_args.dropout,
+                num_experts=model_args.num_experts,
+                top_k=model_args.top_k,
+                theta=model_args.rope_base,
+                eps=model_args.rms_norm_eps
             ).to(device) for _ in range(model_args.num_layers)
         ])
 
@@ -192,7 +224,6 @@ class Transformer(nn.Module):
 
         Args:
             input_ids (torch.Tensor): Input tensor of shape [B, T].
-            window_size (Tuple[int, int]): Window size for SWA.
             padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
             use_cache (bool): Whether to use KV caching during forward pass.
 
@@ -245,28 +276,33 @@ class Transformer(nn.Module):
                 total_aux_loss.dtype == torch.float32
             ), f"total_aux_loss dtype must be float32, got {total_aux_loss.dtype}"
 
-            # TODO: look into chunked checkpointing for larger memory savings.
             # Stack transformer layers
             for i, layer in enumerate(self.layers):
                 if self.model_args.gradient_checkpointing:
                     x, cache_out, aux_loss = checkpoint(
                         layer,
                         x,
-                        self.model_args.window_size,
+                        self.model_args.left_window,
+                        self.model_args.right_window,
+                        self.model_args.use_causal,
                         padding_mask,
                         self.kv_cache,
-                        i,  # layer_idx
+                        i, # layer_idx
                         use_cache,
+                        self.model_args.use_mqa,
                         use_reentrant=False
                     )
                 else:
                     x, cache_out, aux_loss = layer(
-                        x,
-                        window_size=self.model_args.window_size,
+                        x=x,
+                        left_window=self.model_args.left_window,
+                        right_window=self.model_args.right_window,
+                        causal=self.model_args.use_causal,
                         padding_mask=padding_mask,
                         kv_cache=self.kv_cache,
                         layer_idx=i,
-                        use_cache=use_cache
+                        use_cache=use_cache,
+                        use_mqa=self.model_args.use_mqa,
                     )
                 # Accumulate auxiliary loss
                 if aux_loss is not None:
