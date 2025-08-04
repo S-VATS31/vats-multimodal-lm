@@ -3,7 +3,12 @@ import warnings
 class ModelArgsAssertions:
     """Assertions for model arguments."""
     @staticmethod
-    def validate(args):
+    def validate(args) -> None:
+        """Validate model arguments through assertions/ValueErrors.
+        
+        Args:
+            args: Model arguments to be used for assertions.
+        """
         if args.d_model % args.num_heads != 0:
             raise ValueError(
                 f"Expected d_model to be divisible by num_heads, "

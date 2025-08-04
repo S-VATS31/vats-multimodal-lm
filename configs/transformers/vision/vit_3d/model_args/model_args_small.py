@@ -3,7 +3,6 @@ from dataclasses import dataclass
 
 from configs.transformers.vision.vit_3d.model_args.post_init import PostInitMixin
 
-
 @dataclass
 class ModelArgs(PostInitMixin):
     """Small configuration of model arguments, containing 321 million parameters."""
