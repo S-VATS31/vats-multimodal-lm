@@ -29,7 +29,7 @@ class AutoregressiveTokenGenerator:
 
     def _generate(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.LongTensor,
         max_new_tokens: int,
         repetition_penalty: Optional[float] = None,
         temperature: Optional[float] = None,
@@ -264,3 +264,37 @@ class AutoregressiveTokenGenerator:
         else:
             generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
         return generated_text
+
+def main():
+    from transformers import AutoTokenizer
+    # Initialize model and generation arguments
+
+    model_args = ModelArgs()
+    generation_args = GenerationArgs()
+
+    # Load Mistral tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+
+    # Set special tokens
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    generation_args.pad_token_id = tokenizer.pad_token_id
+    generation_args.eos_token_id = tokenizer.eos_token_id
+
+    # Create generator
+    generator = AutoregressiveTokenGenerator(model_args)
+
+    # Example prompt
+    prompt = input("Enter prompt: ")
+
+    # Generate and print the output
+    output = generator.generate_tokens(prompt, generation_args, tokenizer)
+    print("=== Generated Text ===")
+    print(output)
+
+
+if __name__ == "__main__":
+    main()
