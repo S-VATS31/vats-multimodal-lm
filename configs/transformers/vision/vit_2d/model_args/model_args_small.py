@@ -3,24 +3,7 @@ from typing import Tuple
 
 @dataclass
 class ModelArgs:
-    """Small configuration of model arguments, containing 190 million parameters.
-    
-    Args:
-        img_size (int): Height and width of the input image.
-        patch_size (int): Size of each square patch.
-        C_in (int): Number of input channels.
-        d_model (int): Dimensionality of the model's embeddings.
-        num_heads (int): Number of attention heads.
-        query_groups (int): Number of query groups for GQA.
-        d_ffn (int): Dimensionality of the FFN.
-        num_layers (int): Number of transformer layers to be stacked.
-        window_size (Tuple[int, int]): Symmetrical window size for sliding window attention.
-        dropout (float): Dropout probability.
-        rope_base (float): Theta hyperparameter for RoPE.
-        rms_norm_eps (float): Epsilon value for RMSNorm to prevent numerical instability.
-        num_classes (int): Number of classes that are possible based on input image.
-        use_checkpointing (bool): Whether to apply gradient checkpointing or not.
-    """
+    """Small configuration of model arguments, containing 190 million parameters."""
     img_size: int = 384
     patch_size: int = 16
     C_in: int = 3
