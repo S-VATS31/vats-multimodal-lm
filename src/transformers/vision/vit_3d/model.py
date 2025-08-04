@@ -254,14 +254,3 @@ class VideoTransformer(nn.Module):
         ), f"logits must be a 2 dimensional tensor, got {logits.dim()} dimensions"
 
         return logits # [B, num_classes]
-
-def main():
-    model_args = ModelArgs()
-    model = VideoTransformer(model_args).to(device)
-    x = torch.randn(1, 3, 4, 16, 16).to(device)
-    logits = model(x)
-    return logits
-
-if __name__ == "__main__":
-    logits = main()
-    print(logits.shape)
