@@ -35,3 +35,6 @@ class ModelArgs(PostInitMixin):
         """Post initialization to set softmax scale dynamically."""
         if self.softmax_scale is None:
             self.softmax_scale = 1 / math.sqrt(self.d_model // self.num_heads)
+
+        # Call assertions
+        super().__post_init__()
