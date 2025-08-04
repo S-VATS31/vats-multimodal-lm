@@ -13,14 +13,284 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.transformers.nlp.model import RoPE
-from src.transformers.nlp.model import KVCache
+from src.rms_norm import RMSNorm
 
 # TODO: split attention module into 4 main functions:
 # - extend_kv_heads() -> complete
 # - _optimized_attention() -> uncomplete
 # - _fallback_attention() -> uncomplete
 # - forward() -> update forward to support new attn funcs
+
+class RoPE(nn.Module):
+    """Rotary positional embeddings (RoPE) to be applied to the query and key vectors.
+
+    Args:
+        head_dim (int): Dimension of each attention head.
+        theta (float): Exponential base of the inverse frequency.
+
+    Raises:
+        ValueError if `head_dim` is not divisble by 2.
+    """
+    def __init__(self, head_dim: int, theta: float):
+        super().__init__()
+
+        if head_dim % 2 != 0:
+            raise ValueError(f"head_dim ({head_dim}) must be divisible by 2 for even splitting.")
+        self.head_dim = head_dim
+
+        # Compute inverse frequency
+        # inv_freq = 1 / (theta ^ (2i/d)) where d = head_dim
+        # We set dtype=float32 to maintain numerical stability when exponentiating
+        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)).to(device)
+        assert (
+            inv_freq.dtype == torch.float32
+        ), f"inv_freq must have dtype of float32, got {inv_freq.dtype}"
+        self.register_buffer("inv_freq", inv_freq)
+
+        # Lazy cache - will be populated as needed to avoid recomputing sin/cos
+        self.register_buffer("cos_cache", torch.empty(0))
+        self.register_buffer("sin_cache", torch.empty(0))
+        self.cached_seq_len = 0
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass of the RoPE layer.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, T, num_heads, head_dim].
+
+        Returns:
+            torch.Tensor: Tensor with RoPE applied, same shape as input.
+        """
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
+            seq_len = x.size(1)
+
+            # Update cache if needed
+            if seq_len > self.cached_seq_len:
+                self._update_cache(seq_len)
+
+            # Use cached values instead of recomputing
+            # Update all values up till sequence length
+            cos_freqs = self.cos_cache[:seq_len] # [T, head_dim // 2]
+            sin_freqs = self.sin_cache[:seq_len] # [T, head_dim // 2]
+
+            assert (
+                cos_freqs.shape == (seq_len, self.head_dim // 2)
+            ), f"cos_freqs must have shape {(seq_len, self.head_dim //2)} got {cos_freqs.shape}"
+            assert (
+                sin_freqs.shape == (seq_len, self.head_dim // 2)
+            ), f"sin_freqs must have shape {(seq_len, self.head_dim //2)} got {sin_freqs.shape}"
+
+            # Apply rotary embeddings
+            return self._apply_rope(x, cos_freqs, sin_freqs)
+
+    def _update_cache(self, seq_len: int) -> None:
+        """Cache sine and cosine to prevent re-computation during forward pass.
+
+        Args:
+            seq_len (int): Sequence length to cache for.
+        """
+        # Create position indices
+        pos = torch.arange(seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+
+        # Compute frequencies for each position
+        freqs = torch.outer(pos, self.inv_freq) # [T, head_dim//2]
+
+        # Create rotation matrix components and cache them
+        self.cos_cache = torch.cos(freqs) # [T, head_dim//2]
+        self.sin_cache = torch.sin(freqs) # [T, head_dim//2]
+        self.cached_seq_len = seq_len
+
+    def _apply_rope(
+        self,
+        x: torch.Tensor,
+        cos_freqs: torch.Tensor,
+        sin_freqs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the rotation using the RoPE formula.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch_size, seq_len, num_heads, head_dim].
+            cos_freqs (torch.Tensor): Cosine frequencies of shape [seq_len, head_dim//2].
+            sin_freqs (torch.Tensor): Sine frequencies of shape [seq_len, head_dim//2].
+
+        Returns:
+            torch.Tensor: Rotated output tensor with positional awareness.
+        """
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
+            if x.dim() != 4:
+                raise ValueError(f"x must have 4 dimensions, got {x.dim()}")
+            # Split x into even and odd dimensions
+            x1 = x[..., ::2]  # even (2i)
+            x2 = x[..., 1::2] # odd (2i+1)
+
+            # Expand frequency tensors to match input dimensions
+            # We need these to be 4 dimensional tensors for correct broadcasting
+            cos_freqs = cos_freqs[None, :, None, :] # [1, T, 1, head_dim//2]
+            sin_freqs = sin_freqs[None, :, None, :] # [1, T, 1, head_dim//2]
+
+            assert (
+                cos_freqs.shape == (1, x.size(1), 1, self.head_dim // 2)
+            ), f"cos_freqs must have shape {(1, x.size(1), 1, self.head_dim // 2)}, got {cos_freqs.shape}"
+            assert (
+                sin_freqs.shape == (1, x.size(1), 1, self.head_dim // 2)
+            ), f"sin_freqs must have shape {(1, x.size(1), 1, self.head_dim // 2)}, got {sin_freqs.shape}"
+
+            # Complex rotation via rotation matrix
+            # rotation_matrix = [[cos(x), -sin(x)], [sin(x), cos(x)]]
+            # x_even_rot = x_even * rotation_matrix[0]
+            # x_odd_rot = x_odd * rotation_matrix[1]
+            rotated_x1 = x1 * cos_freqs - x2 * sin_freqs
+            rotated_x2 = x1 * sin_freqs + x2 * cos_freqs
+
+            # Interleave the rotated components back
+            rotated_x = torch.stack([rotated_x1, rotated_x2], dim=-1)
+            rotated_x = rotated_x.flatten(-2)
+
+            return rotated_x
+
+    def get_cos_sin_cache(
+        self,
+        seq_len: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Cache sine and cosine to prevent re-computation during forward pass.
+
+        Args:
+            seq_len (int): Sequence length
+
+        Returns:
+            tuple: Cached values.
+                - torch.Tensor: Cached cosine frequencies.
+                - torch.Tensor: Cached sine frequencies.
+        """
+        # Ensure cache is up to date for this sequence length
+        if seq_len > self.cached_seq_len:
+            self._update_cache(seq_len)
+
+        # Return the cached values for the requested length
+        cos_freqs = self.cos_cache[:seq_len]
+        sin_freqs = self.sin_cache[:seq_len]
+        return cos_freqs, sin_freqs
+
+
+class KVCache:
+    """Key-Value cache for efficient autoregressive generation.
+
+    Args:
+        max_batch_size (int): Maximum batch size supported by the cache.
+        max_seq_len (int): Maximum sequence length supported by the cache.
+        num_heads (int): Number of attention heads (or query groups for GQA).
+        head_dim (int): Dimension of each attention head.
+        num_layers (int): Number of transformer layers.
+    """
+    def __init__(
+        self,
+        max_batch_size: int,
+        max_seq_len: int,
+        num_heads: int,
+        head_dim: int,
+        num_layers: int,
+    ):
+        self.max_batch_size = max_batch_size
+        self.max_seq_len = max_seq_len
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.num_layers = num_layers
+
+        # Initialize cache state to None
+        self.cache = None
+        self.current_seq_len = None
+        self.batch_size = None
+
+    def initialize(self, batch_size: int) -> None:
+        """Initialize or reset the cache for a given batch size.
+
+        Args:
+            batch_size (int): Number of sequences to process.
+
+        Raises:
+            ValueError: If batch_size exceeds max_batch_size.
+        """
+        if batch_size > self.max_batch_size:
+            raise ValueError(f"Batch size {batch_size} exceeds maximum {self.max_batch_size}")
+
+        self.batch_size = batch_size
+        self.current_seq_len = 0
+
+        # Initialize KV cache with zeros
+        self.cache = [
+            {
+                'k': torch.zeros((
+                    batch_size, self.max_seq_len, self.num_heads, self.head_dim
+                    ), dtype=dtype).to(device),
+                'v': torch.zeros((
+                    batch_size, self.max_seq_len, self.num_heads, self.head_dim
+                    ), dtype=dtype).to(device)
+            }
+            for _ in range(self.num_layers)
+        ]
+
+    def update(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor) -> None:
+        """Update the cache with new key and value tensors for a specific layer. Updates KV cache
+        in-place.
+
+        Args:
+            layer_idx (int): Index of the transformer layer to query.
+            k (torch.Tensor): Key tensor of shape [batch_size, seq_len, num_heads, head_dim].
+            v (torch.Tensor): Value tensor of shape [batch_size, seq_len, num_heads, head_dim].
+
+        Raises:
+            ValueError: If sequence length exceeds max_seq_len.
+        """
+        if self.cache is None or self.batch_size != k.size(0):
+            self.initialize(k.size(0))
+
+        new_seq_len = k.size(1)
+        # Ensure current T + new T <= max T
+        if self.current_seq_len + new_seq_len > self.max_seq_len:
+            raise ValueError(f"Sequence length {self.current_seq_len + new_seq_len} exceeds maximum {self.max_seq_len}")
+
+        # Update cache with new key and value tensors
+        self.cache[layer_idx]['k'][:, self.current_seq_len:self.current_seq_len + new_seq_len] = k
+        self.cache[layer_idx]['v'][:, self.current_seq_len:self.current_seq_len + new_seq_len] = v
+
+    def get(
+        self, 
+        layer_idx: int, 
+        seq_len: int
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Retrieve key and value tensors up to the specified sequence length.
+
+        Args:
+            layer_idx (int): Index of the transformer layer to query.
+            seq_len (int): Sequence length to retrieve.
+
+        Returns:
+            Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]: Key and value tensors up to seq_len,
+                or (None, None) if cache is uninitialized or seq_len exceeds current_seq_len.
+        """
+        if self.cache is None or seq_len > self.current_seq_len:
+            return None, None
+
+        # Return KV cache up to the requested sequence length
+        return (
+            self.cache[layer_idx]['k'][:, :seq_len],
+            self.cache[layer_idx]['v'][:, :seq_len]
+        )
+
+    def increment_seq_len(self, increment: int) -> None:
+        """Increment the current sequence length after updating the cache.
+
+        Args:
+            increment (int): Amount to increment the current sequence length.
+        """
+        self.current_seq_len += increment
+
+    def reset(self) -> None:
+        """Reset the cache to its initial state."""
+        self.cache = None
+        self.current_seq_len = None
+        self.batch_size = None
+
 
 class Attention(nn.Module):
     """Apply Grouped Query Attention (GQA) to QKV vectors as well as causal masking.
@@ -458,3 +728,66 @@ class Attention(nn.Module):
 
             # Final projection
             return self.w_o(out), cache_out
+
+
+class AttentionBlock(nn.Module):
+    """Attention block where RMSNorm, Dropout, and residuals are applied.
+
+    Args:
+        d_model (int): Dimensionality of the model's embeddings.
+        num_heads (int): Number of attention heads for KV vectors, shared across grouped query heads in GQA.
+        query_groups (int): Number of query groups that partition the queries into subsets.
+        dropout (float): Probability that model components will be randomly dropped out.
+        theta (float): Exponential base of the inverse frequency.
+        eps (float): Small epsilon value to ensure numerical stability.
+    """
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        query_groups: int,
+        dropout: float,
+        theta: float,
+        eps: float,
+    ):
+        super().__init__()
+
+        self.rms_norm = RMSNorm(d_model, eps)
+        self.attn = Attention(d_model, num_heads, query_groups, theta)
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        window_size: Tuple[int, int],
+        padding_mask: Optional[torch.Tensor] = None,
+        kv_cache: Optional[KVCache] = None,
+        layer_idx: Optional[int] = None,
+        use_cache: bool = False
+    ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
+        """Forward pass of the Attention Block.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, T, d_model].
+            window_size (Tuple[int, int]): Window size for SWA.
+            padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
+            kv_cache (Optional[KVCache]): Key-value cache for efficient generation.
+            layer_idx (Optional[int]): Index of the current layer for cache access.
+            use_cache (bool): Whether to use KV caching during forward pass.
+
+        Returns:
+            Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
+                - torch.Tensor: Output tensor of shape [B, T, d_model].
+                - Dict[str, torch.Tensor]: Cache dictionary with 'k' and 'v' tensors.
+        """
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
+            attn_out, cache_out = self.attn(
+                self.rms_norm(x),
+                window_size,
+                padding_mask=padding_mask,
+                kv_cache=kv_cache,
+                layer_idx=layer_idx,
+                use_cache=use_cache
+            )
+            return x + self.dropout(attn_out), cache_out
+        
