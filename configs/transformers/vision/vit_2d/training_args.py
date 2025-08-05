@@ -1,35 +1,9 @@
 from dataclasses import dataclass
 from typing import Tuple
 
-# TODO: check all .../training_args.py to check if docstring matches args
-
 @dataclass
 class TrainingArgs:
-    """Dataclass containing model training arguments
-    
-    Args:
-        learning_rate (float): Hyperparameter controlling learning rate.
-        epochs (int): Number of passes through the total dataset.
-        batch_size (int): Number of examples being processed during each step.
-        epsilon (float): Epsilon value for AdamW optimizer.
-        max_norm (float): Maximum norm to clip gradients to.
-        weight_decay (float): Weight decay for AdamW optimizer.
-        betas (Tuple[float, float]): Tuple of beta value for AdamW optimizer.
-        fused (bool): Fused bool for AdamW optimizer.
-        warmup_epochs (int): Number of epochs that are warmup.
-        eta_min (float): Minimum learning rate for cosine scheduler.
-        save_checkpoint_freq (int): Regular checkpoint to save every N epochs.
-        mixup_alpha (float): Alpha hyperparameter for mixup augmentation.
-        cutmix_alpha (float): Alpha hyperparameter for cutmix augmentation.
-        label_smoothing (float): Label smoothing hyperparameter for CE loss.
-        random_erasing_prob (float): Probability a portion of the image gets erased.
-        color_jitter (float): Regularization to prevent overfitting.
-        auto_augment (bool): Automatically sets augmentations fit to dataset, rather than manually setting.
-        num_workers (int): Number of workers to load the data.
-        pin_memory (bool): Whether to pin memory or not.
-        persistent_workers (bool): Whether workers are kept alive over epochs.
-        grad_accum_steps (int): Gradient accumulation steps for a larger effective batch size.
-    """
+    """Dataclass containing model training arguments."""
     learning_rate: float = 2e-4
     epochs: int = 300
     batch_size: int = 256

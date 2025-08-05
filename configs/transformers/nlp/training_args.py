@@ -3,30 +3,7 @@ from dataclasses import dataclass
 
 @dataclass
 class TrainingArgs:
-    """Dataclass containing model training arguments.
-    
-    Args:
-        learning_rate (float): Hyperparameter controlling learning rate.
-        epochs (int): Number of passes through the total dataset.
-        batch_size (int): Number of examples being processed during each step.
-        epsilon (float): Epsilon value for AdamW optimizer.
-        clip_grad_norm (float): Maximum norm to clip gradients to.
-        weight_decay (float): Weight decay for AdamW optimizer.
-        betas (Tuple[float, float]): Tuple of beta value for AdamW optimizer.
-        fused (bool): Fused bool for AdamW optimizer.
-        warmup_ratio (float): Ratio of steps that are considered as warmup steps.
-        aux_loss_weight (float): Auxiliary loss weight to compute total loss.
-        eta_min (float): Minimum learning rate for cosine scheduler.
-        num_cycles (float): Number of cosine cycles completed during training.
-        num_workers (int): Number of workers to load data.
-        pin_memory (bool): Whether to pin memory or not.
-        persistent_workers (bool): Whether to keep workers alive through epochs.
-        drop_last (bool): Whether the final batch (smaller than the actual batch size) is used or dropped.
-        grad_accum_steps (int): Gradient accumulation steps to get a larger effective batch size.
-        save_freq (int): Number of tokens accumulated until regular checkpoint is saved.
-        max_skipped_steps (int): Max steps to be skipped before epoch is ended.
-        max_train_tokens (int): Max amount of tokens to train on.
-    """
+    """Dataclass containing model training arguments."""
     learning_rate: float = 2e-4
     epochs: int = 3
     batch_size: int = 256
