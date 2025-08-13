@@ -5,7 +5,6 @@ from configs.setup_env import (
     flash_attn_varlen_qkvpacked_func
 )
 
-import math
 import warnings
 from typing import Tuple, Optional, Dict
 
@@ -402,6 +401,8 @@ class Attention(nn.Module):
             kv_cache (Optional[KVCache]): Key-value cache for efficient generation.
             layer_idx (Optional[int]): Index of the current layer for cache access.
             use_cache (bool): Whether to use KV caching during forward pass.
+            use_mqa (bool): Whether to use multi-query attention or not.
+                Constraints: query_groups == 1.
 
         Returns:
             Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
