@@ -23,6 +23,7 @@ class TrainingArgs:
     drop_last: bool = True
     train_ratio: float = 0.95  # TODO: deprecate this or actually use it 
     grad_accum_steps: int = 4
+    save_checkpoint_freq: int = 5
 
     # TODO: actually use this for logging or remove
     logging_steps: int = 100
