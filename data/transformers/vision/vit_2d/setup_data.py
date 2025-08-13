@@ -17,8 +17,9 @@ def setup_data_loaders(
         training_args (TrainingArgs): Training hyperparameters.
 
     Returns:
-        DataLoader: Data loader containing all training examples.
-        DataLoader: Data loader containing all validation examples.
+        Tuple:
+            - DataLoader: Data loader containing all training examples.
+            - DataLoader: Data loader containing all validation examples.
     """
     # Training transforms with data augmentation
     train_transform = transforms.Compose([

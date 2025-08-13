@@ -6,7 +6,7 @@ import logging
 from src.transformers.vision.vit_2d.model import VisionTransformer
 from configs.transformers.vision.vit_2d.training_args import TrainingArgs
 from configs.transformers.vision.vit_2d.model_args.model_args_large import ModelArgs
-from utils.transformers.vision.vit_2d.visualization import plot_metrics
+from utils.transformers.vision.visualization import plot_metrics
 from training.transformers.vision.vit_2d.loops.training_loop import train
 from training.transformers.nlp.loops.validation_loop import validate
 from data.transformers.vision.vit_2d.setup_data import setup_data_loaders
@@ -58,12 +58,12 @@ def main(
     # Resume from checkpoint if provided
     try:
         if resume_from_checkpoint is not None:
-            training_logger.info(f"Resuming from checkpoint: {resume_from_checkpoint}")
             checkpoint_info = load_checkpoint(
                 resume_from_checkpoint, model, optimizer, scheduler, scaler, device
             )
             start_epoch = checkpoint_info['epoch'] + 1
             best_loss = checkpoint_info['loss']
+            training_logger.info(f"Resuming from checkpoint: {resume_from_checkpoint}")
     except FileNotFoundError as e:
         training_logger.error(f"Checkpoint: {resume_from_checkpoint} was not found.")
     except RuntimeError as e:
@@ -162,3 +162,4 @@ def main(
 if __name__ == "__main__":
     train_losses, train_accuracies, val_losses, val_accuracies = main()
     plot_metrics(train_losses, train_accuracies, val_losses, val_accuracies)
+    
