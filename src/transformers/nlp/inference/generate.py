@@ -100,7 +100,7 @@ class AutoregressiveTokenGenerator:
                     last_token = generated_ids[:, -1:].contiguous()
                     last_attention = torch.ones(B, 1, dtype=torch.bool).to(device)
                     # Only process unfinished sequences
-                    last_attention = last_attention & unfinished_sequences.unsqueeze(1)
+                    last_attention = last_attention & unfinished_sequences[:, None]
 
                     logits, _, _ = self.model(
                         input_ids=last_token, padding_mask=last_attention, use_cache=True
@@ -111,7 +111,7 @@ class AutoregressiveTokenGenerator:
                     if attention_mask.shape[1] < current_seq_len:
                         # Extend attention mask for new tokens
                         new_attention = torch.cat([attention_mask,
-                            unfinished_sequences.unsqueeze(1).expand(-1, current_seq_len - attention_mask.shape[1])
+                            unfinished_sequences[:, None].expand(-1, current_seq_len - attention_mask.shape[1])
                         ], dim=1)
                     else:
                         new_attention = attention_mask[:, :current_seq_len]
@@ -201,12 +201,12 @@ class AutoregressiveTokenGenerator:
                 next_tokens = torch.where(unfinished_sequences, next_tokens, pad_token_id)
 
                 # Append new tokens
-                generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(1)], dim=1)
+                generated_ids = torch.cat([generated_ids, next_tokens[:, None]], dim=1)
 
                 # Update attention mask
                 attention_mask = torch.cat([
                     attention_mask,
-                    unfinished_sequences.unsqueeze(1)
+                    unfinished_sequences[:, None]
                 ], dim=1)
 
                 # Check for EOS tokens
