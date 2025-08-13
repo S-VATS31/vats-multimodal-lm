@@ -20,7 +20,7 @@ from utils.transformers.nlp.checkpointing import save_checkpoint, load_checkpoin
 from utils.transformers.nlp.compute_metrics import compute_perplexity
 from utils.transformers.nlp.visualization import plot_metrics
 from utils.setup_logger import setup_logger
-from src.transformers.nlp.generate import AutoregressiveTokenGenerator
+from src.transformers.nlp.inference.generate import AutoregressiveTokenGenerator
 
 # Set up logger
 training_logger = setup_logger(
