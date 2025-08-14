@@ -8,7 +8,7 @@ from torch.amp import autocast
 from torch.utils.checkpoint import checkpoint
 
 from src.rms_norm import RMSNorm
-from src.transformers.vision.ffn_block import FFNBlock
+from src.ffn_block import FFNBlock
 from src.transformers.vision.vit_3d.optimized_attention import AttentionBlock
 from src.transformers.vision.vit_3d.patch_embeddings3d import PatchEmbeddings3D
 from configs.transformers.vision.vit_3d.model_args.model_args_large import ModelArgs

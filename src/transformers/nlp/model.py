@@ -10,7 +10,7 @@ from torch.utils.checkpoint import checkpoint
 
 from src.rms_norm import RMSNorm
 from src.transformers.nlp.moe import MoEBlock
-from src.transformers.nlp.optimized_attention import AttentionBlock, KVCache
+from src.optimized_attention import AttentionBlock, KVCache
 from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 
 class TransformerBlock(nn.Module):
