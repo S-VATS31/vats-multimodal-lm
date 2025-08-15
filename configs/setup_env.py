@@ -24,4 +24,6 @@ try:
 except:
     use_xformers_swiglu = False
     swiglu = None
-    
+
+# Ensure dtypes are float16 or bfloat16 for specific functions
+gpu_dtypes = [torch.float16, torch.bfloat16]
