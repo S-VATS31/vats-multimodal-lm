@@ -33,4 +33,4 @@ class FFNBlock(nn.Module):
             torch.Tensor: Output tensor with the same shape.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return self.dropout(self.gated_ffn(self.rms_norm(x)))
+            return x + self.dropout(self.gated_ffn(self.rms_norm(x)))
