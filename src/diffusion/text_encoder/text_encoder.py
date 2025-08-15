@@ -17,7 +17,7 @@ from torch.utils.checkpoint import checkpoint
 from src.optimized_attention import RoPE
 from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
-# from configs.transformers.diffusion.model_args.model_args_large import ModelArgs
+from configs.diffusion.text_encoder.model_args.model_args_large import ModelArgs
 
 class Attention(nn.Module):
     """Attention module for encoder.
