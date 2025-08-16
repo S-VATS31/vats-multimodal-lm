@@ -75,7 +75,7 @@ class PatchEmbeddings3D(nn.Module):
                 size=self.target_size, 
                 mode='bilinear',
                 align_corners=False
-            ).view(B, C, T, *self.target_size) # [B, C, T, new_H, new_W]
+            ).view(B, C, T, *self.target_size) # [B, C, T, target_size[0], target_size[1]]
 
             assert (
                 x.size(-2) == self.target_size[0] and x.size(-1) == self.target_size[1]
@@ -138,7 +138,6 @@ class PatchEmbeddings3D(nn.Module):
                 assert (
                     x.shape == (B, C, self.max_frames, *self.target_size)
                 ), (
-                    f"Truncation failed: "
                     f"x must have shape of {(B, C, self.max_frames, *self.target_size)}, got {x.shape}"
                 )
 
@@ -157,7 +156,7 @@ class PatchEmbeddings3D(nn.Module):
             grid_h = processed_H // ph
             grid_w = processed_W // pw
             grid_size = (grid_t, grid_h, grid_w)
-            N = grid_t * grid_h * grid_w
+            N = grid_t * grid_h * grid_w # USE FOR PATCH MASK, NOT FOR OUT TENSOR
 
             # Project patch embeddings
             x = self.projection(x) # [B, d_model, T, H, W]; C_in (in) -> d_model (out)
@@ -187,8 +186,8 @@ class PatchEmbeddings3D(nn.Module):
 
             # Create patch mask of shape [B, N]
             patch_mask = (
-                pooled[:, :, None, None] # [B, grid_t, 1, 1], need singleton dimensions to expand
-                .expand(B, grid_t, grid_h, grid_w) # returns non-contiguous tensor, call .contiguous()
+                pooled[:, :, None, None] # [B, grid_t, 1, 1]; need singleton dimensions to expand
+                .expand(B, grid_t, grid_h, grid_w) # expand returns non-contiguous tensor
                 .contiguous()
                 .view(B, N)
             )
@@ -203,9 +202,44 @@ class PatchEmbeddings3D(nn.Module):
                 x.dim() == 5
             ), f"x must be a 5 dimenional tensor, got {x.dim()} dimensions"
 
-            x = x.view(B, self.d_model, -1).transpose(1, 2) # [B, N, d_model]
+            x = x.view(B, grid_t, -1, self.d_model) # [B, grid_T, grid_H*grid_W, d_model]
             assert (
-                x.shape == (B, N, self.d_model)
-            ), f"x must have shape of {(B, N, self.d_model)}, got {x.shape}"
+                x.shape == (B, grid_t, grid_h*grid_w, self.d_model) # [B, grid_T, grid_H * grid_W, d_model]
+            ), f"x must have shape of {(B, grid_t, grid_h*grid_w, self.d_model)}, got {x.shape}"
 
             return x, processed_shape, patch_mask, grid_size
+
+def main() -> torch.Tensor:
+    C_in, d_model = 3, 512
+    patch_size = (2, 32, 32)
+    target_size = (384, 384)
+    max_frames = 10
+    patch_embeddings = PatchEmbeddings3D(
+        C_in, patch_size, target_size, 
+        max_frames, d_model
+    ).to(device)
+    B, T, H, W = 4, 24, 512, 512
+    x = torch.randn(B, C_in, T, H, W).to(device)
+    x_out, processed_shape, patch_mask, grid_size = patch_embeddings(x)
+    return x_out, processed_shape, patch_mask, grid_size
+
+if __name__ == "__main__":
+    x, processed_shape, patch_mask, grid_size = main()
+    # [B, grid_T, grid_H * grid_W, d_model]
+    # B = 4
+    # x_interpolate shape: [4, 3, 24, 384, 384]
+    # x_trunc = [4, 3, 10, 384, 384]
+    # processed_T = x.size(2) = 10
+    # processed_H = x.size(3) = 384
+    # processed_W = x.size(4) = 384
+    # grid_T = 10 // 2 = 5
+    # grid_H = 384 // 32 = 12
+    # grid_W = 384 // 32 = 12
+    # out.shape: [B, grid_T, grid_H*grid_W, d_model]
+    # out.shape = [4, 5, 144, 512]
+    # patch_mask.shape: [B, grid_T*grid_H*grid_W]
+    # patch_mask.shape = [4, 720]
+    # processed_shape = (max_frames, target_size[0], target_size[1])
+    print(x.shape)
+    print(processed_shape)
+    print(patch_mask.shape)
