@@ -705,12 +705,12 @@ class TransformerTextEncoder(nn.Module):
     Args:
         model_args (ModelArgs): Model hyperparameters.
     """
-    def __init__(self, model_args): # TODO: type hint to ModelArgs once complete
+    def __init__(self, model_args: ModelArgs):
         super().__init__()
 
         self.model_args = model_args
 
-        self.token_embedding = nn.Embedding(model_args.d_model, model_args.vocab_size)
+        self.token_embedding = nn.Embedding(model_args.vocab_size, model_args.d_model)
         self.dropout = nn.Dropout(p=model_args.dropout)
 
         # Stack encoder blocks
@@ -733,7 +733,7 @@ class TransformerTextEncoder(nn.Module):
         self.rms_norm = RMSNorm(model_args.d_model, model_args.rms_norm_eps).to(device)
 
         # Initialize weights
-        self.apply(self._init_weights)
+        # self.apply(self._init_weights)
 
     def _init_weights(module) -> None:
         pass
@@ -750,7 +750,7 @@ class TransformerTextEncoder(nn.Module):
             padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
 
         Returns:
-            torch.Tensor
+            torch.Tensor: Output tensor of shape [B, T, d_model].
         """
         input_ids = input_ids.to(torch.int64, copy=False)
         assert (
@@ -805,3 +805,19 @@ class TransformerTextEncoder(nn.Module):
 
         return x
     
+def main(use_pad: bool):
+    model_args = ModelArgs()
+    model = TransformerTextEncoder(model_args).to(device)
+    B, T = 4, 16
+    input_ids = torch.randint(
+        0, model_args.vocab_size, (B, T), dtype=torch.int64
+    ).to(device)
+    if use_pad:
+        print("using pad")
+        padding_mask = torch.randint(0, 2, (B, T), dtype=torch.bool).to(device)
+        return model(input_ids, padding_mask)
+    return model(input_ids)
+
+if __name__ == "__main__":
+    x = main(True)
+    print(x.shape)
