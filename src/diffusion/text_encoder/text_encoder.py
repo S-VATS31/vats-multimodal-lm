@@ -1,5 +1,6 @@
 from configs.setup_env import device, dtype
 
+import math
 from typing import Optional
 
 import torch
@@ -127,10 +128,26 @@ class TransformerTextEncoder(nn.Module):
         self.rms_norm = RMSNorm(model_args.d_model, model_args.rms_norm_eps).to(device)
 
         # Initialize weights
-        # self.apply(self._init_weights)
+        self.apply(self._init_weights)
 
-    def _init_weights(module) -> None:
-        pass
+    def _init_weights(self, module) -> None:
+        """Weight initialization for a text encoder used in image generation."""
+        if isinstance(module, nn.Linear):
+            # Xavier uniform initialization
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            # Embedding weights: normal or Xavier uniform
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Conv1d):
+            # Sometimes used for positional encoding projections
+            nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
 
     def forward(
         self,
