@@ -616,5 +616,24 @@ class AttentionBlock(nn.Module):
                 padding_mask=padding_mask,
                 use_diffusion=use_diffusion,
             )))
-        
-# TODO: test attention module.
+    
+def main():
+    d_model, num_heads, query_groups, theta = 512, 32, 1, 10000.0
+    softmax_scale = 1 / (d_model // num_heads)
+    attention = Attention(
+        d_model,  num_heads, query_groups, 
+        theta, softmax_scale, False, True
+    ).to(device)
+    B, T = 4, 16
+    x = torch.randn(B, T, d_model).to(device)
+    left_window, right_window = -1, -1
+    padding_mask = torch.randint(0, 2, (B, T), dtype=torch.bool).to(device)
+    x_out, q, k, v = attention(x, left_window, right_window, True, padding_mask, True, _return_qkv=True)
+    return x_out, q, k, v
+
+if __name__ == "__main__":
+    x, q, k, v = main()
+    print(x.shape) # [4, 16, 512]
+    print(q.shape) # [4, 16, 32, 16]
+    print(k.shape) # [4, 16, 1, 16]
+    print(v.shape) # [4, 16, 1, 16]
