@@ -1,6 +1,7 @@
 from configs.setup_env import (
     device, 
     dtype,
+    gpu_dtypes,
     use_flash_attn,
     flash_attn_varlen_qkvpacked_func
 )
@@ -544,12 +545,15 @@ class Attention(nn.Module):
             # FlashAttention 2 - requires CUDA/flash attn available/bf16 or fp16
             if (
                 use_flash_attn  and device.type == "cuda"
-                and q.dtype in [torch.float16, torch.bfloat16]
-                and k.dtype in [torch.float16, torch.bfloat16]
-                and v.dtype in [torch.float16, torch.bfloat16]
+                and q.dtype in gpu_dtypes
+                and k.dtype in gpu_dtypes
+                and v.dtype in gpu_dtypes
                 and q.is_cuda and k.is_cuda and v.is_cuda
             ):
                 qkv_packed = torch.stack([q, k, v], dim=3).contiguous() # [B, T, num_heads, 3, head_dim]
+                assert (
+                    qkv_packed.shape == (B, T, self.num_heads, 3, self.head_dim)
+                ), f"qkv_packed must have shape of {(B, T, self.num_heads, 3, self.head_dim)}, got {qkv_packed.shape}"
                 assert (
                     qkv_packed.is_contiguous()
                 ), "qkv_packed must be contiguous."
@@ -700,9 +704,6 @@ class Attention(nn.Module):
                     f"or {(B, 1, T, self.head_dim)} got {k.shape}"
                 )
 
-                # Initialize padding mask
-                attn_mask = None
-
                 # Apply padding mask for PyTorch SDPA
                 if padding_mask is not None:
                     if padding_mask.shape != (B, T):
@@ -741,6 +742,8 @@ class Attention(nn.Module):
                     assert (
                         attn_mask.shape == (B, self.num_heads, q.size(2), k.size(2))
                     ), f"attn_mask must have shape {(B, self.num_heads, q.size(2), k.size(2))}, got {attn_mask.shape}"
+                else:
+                    attn_mask = None
 
                 # Call PyTorch's scaled dot product attention
                 out = F.scaled_dot_product_attention(
@@ -805,7 +808,6 @@ class AttentionBlock(nn.Module):
             use_proj_bias=use_proj_bias, 
             use_qkv_proj=use_qkv_proj
         )
-
 
     def forward(
         self,
