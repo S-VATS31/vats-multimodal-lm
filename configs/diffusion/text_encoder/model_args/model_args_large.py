@@ -2,8 +2,10 @@ import math
 from typing import Optional
 from dataclasses import dataclass
 
+from configs.diffusion.text_encoder.model_args.post_init import PostInitMixin
+
 @dataclass
-class ModelArgs:
+class ModelArgs(PostInitMixin):
     """Medium configuration of model arguments."""
     d_model: int = 1440
     num_heads: int = 24
@@ -25,10 +27,10 @@ class ModelArgs:
     enable_mqa: bool = False
     max_batch_size: int = 1024
 
-    # def __post_init__(self):
-    #     """Post initialization to set softmax scale dynamically."""
-    #     if self.softmax_scale is None:
-    #         self.softmax_scale = 1 / math.sqrt(self.d_model // self.num_heads)
+    def __post_init__(self):
+        """Post initialization to set softmax scale dynamically."""
+        if self.softmax_scale is None:
+            self.softmax_scale = 1 / math.sqrt(self.d_model // self.num_heads)
 
-    #     # Call assertions
-    #     super().__post_init__()
+        # Call assertions
+        super().__post_init__()
