@@ -209,7 +209,8 @@ class PatchEmbeddings3D(nn.Module):
 
             return x, processed_shape, patch_mask, grid_size
 
-def main() -> torch.Tensor:
+# TODO: deprecate return of processed shape since grid size is already dynamically computed
+def main():
     C_in, d_model = 3, 512
     patch_size = (2, 32, 32)
     target_size = (384, 384)
