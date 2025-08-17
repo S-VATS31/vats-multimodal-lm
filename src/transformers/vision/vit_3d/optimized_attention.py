@@ -1,13 +1,14 @@
 from configs.setup_env import (
     device,
     dtype,
+    gpu_dtypes,
     use_flash_attn,
     flash_attn_varlen_qkvpacked_func
 )
 
 import math
 import warnings
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Literal
 
 import torch
 import torch.nn as nn
@@ -17,8 +18,8 @@ from torch.amp import autocast
 from src.rms_norm import RMSNorm
 from src.transformers.vision.vit_3d.rope_3d import RoPE3D
 
-class Attention(nn.Module):
-    """Attention layer with Flash Attention 2, SWA, and GQA support.
+class SpatioTemporalAttention(nn.Module):
+    """Factorized attention layer.
     
     Args:
         d_model (int): Dimensionality of the model's embeddings.
@@ -56,7 +57,6 @@ class Attention(nn.Module):
             d_model,
             num_heads * self.head_dim + 2 * query_groups * self.head_dim,
             bias=False, # decrease parameter count
-            dtype=dtype
         )
 
         # O projection matrix
@@ -64,7 +64,6 @@ class Attention(nn.Module):
             d_model,
             d_model,
             bias=False,
-            dtype=dtype
         )
 
         # Initialize RoPE
@@ -75,7 +74,7 @@ class Attention(nn.Module):
         kv_tensor: torch.Tensor,
         heads_per_group: int,
         kv_heads_dim: int,
-        use_mqa: bool = False, 
+        use_mqa: bool,
     ) -> torch.Tensor:
         """Extend kv heads to num_heads.
         
@@ -91,10 +90,6 @@ class Attention(nn.Module):
             torch.Tensor: K or V tensor with kv heads dimension repeated, now equal to num_heads.
         """
         if use_mqa and kv_tensor.size(kv_heads_dim) == 1:
-            warnings.warn(
-                "Although MQA is memory efficient and fast, it is not recommended on video transformers. "
-                "Consider using GQA for reduced memory usage while still maintaining expressiveness."
-            )
             return kv_tensor
         return torch.repeat_interleave(kv_tensor, repeats=heads_per_group, dim=kv_heads_dim)
 
@@ -135,12 +130,12 @@ class Attention(nn.Module):
         # Optimized Flash Attention 2 + SWA + GQA or MQA route
         if (
             use_flash_attn and device.type == "cuda"
-            and query.dtype in [torch.float16, torch.bfloat16]
-            and key.dtype in [torch.float16, torch.bfloat16] 
-            and value.dtype in [torch.float16, torch.bfloat16]
+            and query.dtype in gpu_dtypes
+            and key.dtype in gpu_dtypes
+            and value.dtype in gpu_dtypes
         ):
             if padding_mask is not None:
-                # Create padding mask
+                # Handle padding mask
                 assert (
                     padding_mask.shape == (B, N)
                 ), f"padding_mask must have shape {(B, N)}, got {padding_mask.shape}."
@@ -205,14 +200,12 @@ class Attention(nn.Module):
 
                 return attn_out_full # return output with padded positions
             else:
-                # TODO: maybe implement this, but typically padding_mask != None
-                warnings.warn("no fallback to padding_mask == None.")
+                raise ValueError("no fallback to padding_mask = None.")
 
         # Either import didn't work, or no cuda; fallback to gqa/flash attn, w/o swa
         else:
             warnings.warn("Optimized attention not available, using PyTorch SDPA.")
             return self._grouped_query_attention(query, key, value, B, N, padding_mask)
-
 
     def _grouped_query_attention(
         self,
@@ -265,11 +258,180 @@ class Attention(nn.Module):
         ), f"attn_out must have shape of {(B, N, self.d_model)}, got {attn_out.shape}"
 
         return attn_out
+    
+    def _spatial_attention() -> torch.Tensor:
+        pass
+
+    def _temporal_attention() -> torch.Tensor:
+        pass
+
+    def _setup_qkv(
+        self,
+        x: torch.Tensor,
+        use_mqa: bool,
+        grid_shape: Tuple[int, int, int],
+        attn_mode: Literal["spatial", "temporal"]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Set up query, key, and value tensors based on spatial or temporal attention.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, grid_T, grid_H * grid_W, d_model]
+            attn_mode (Literal["spatial", "temporal"]): Attention mode to set qkv up properly.
+
+        Returns:
+            Tuple:
+                - torch.Tensor: Query tensor.
+                - torch.Tensor: Key tensor.
+                - torch.Tensor: Value tensor.
+
+        NOTE:
+            A better method of assertions could assert the first 2 dims for x after first reshape.
+            Example:
+            >>> assert x.shape[:2] == (correct_shape)
+            Then for later assertions, we can assume the first two dimensions are correct and
+            only assert the final dim(s).
+            Example:
+            >>> assert q.shape[-1] == (correct_shape)
+            This would remove the need for doing if attn_method == "method" before all assertions, however
+            if the starting dimensions are wrong, we would not get the assertion call.
+        """
+        assert (
+            x.dim() == 4
+        ), f"x must be a 4-dim tensor, got {x.dim()}"
+        B, T, num_spatial_patches, _ = x.shape
+        
+        if attn_mode == "spatial":
+            x = x.view(B*T, num_spatial_patches, -1) # reshape to [B*T, H*W, d_model]
+            assert (
+                x.shape == (B*T, num_spatial_patches, self.d_model)
+            ), f"x must have shape of {(B*T, num_spatial_patches, self.d_model)}, got {x.shape}"
+        elif attn_mode == "temporal":
+            x = x.transpose(1, 2).contiguous().view(B*num_spatial_patches, T, -1) # reshape to [B*H*W, T, d_model]
+            assert (
+                x.shape == (B*num_spatial_patches, T, self.d_model)
+            ), f"x must have shape of {(B*num_spatial_patches, T, self.d_model)}, got {x.shape}"
+        else:
+            raise ValueError(f"attn_mode must be 'spatial' or 'temporal', got {attn_mode}")
+        
+        # [:, :, num_heads * head_dim + 2 * query_groups * head_dim]
+        qkv = self.w_qkv(x)
+        if attn_mode == "spatial":
+            assert (
+                qkv.shape == (
+                    B*T, num_spatial_patches, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim
+                    )
+            ), (
+                f"qkv must have shape of {(
+                    B*T, num_spatial_patches, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim
+                    )} "
+                f"got {qkv.shape}"
+            )
+        elif attn_mode == "temporal":
+            assert (
+                qkv.shape == (
+                    B*num_spatial_patches, T, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim
+                    )
+            ), (
+                f"qkv must have shape of {(
+                    B*num_spatial_patches, T, self.num_heads * self.head_dim + 2 * self.query_groups * self.head_dim
+                    )} "
+                f"got {qkv.shape}"
+            )
+        
+        # q shape: [:, :, num_heads * head_dim]
+        # kv shape: [:, :, 2 * query_groups * head_dim]
+        q, kv = torch.split(
+            qkv, [self.num_heads * self.head_dim, 2 * self.query_groups * self.head_dim], dim=-1
+        )
+        if attn_mode == "spatial":
+            assert (
+                q.shape == (B*T, num_spatial_patches, self.d_model)
+            ), f"q must have shape of {(B*T, num_spatial_patches, self.d_model)}, got {q.shape}"
+            assert (
+                kv.shape == (B*T, num_spatial_patches, 2 * self.query_groups * self.head_dim)
+            ), f"kv must have shape of {(B*T, num_spatial_patches, 2 * self.query_groups * self.head_dim)}, got {kv.shape}"
+        elif attn_mode == "temporal":
+            assert (
+                q.shape == (B*num_spatial_patches, T, self.d_model)
+            ), f"q mut have shape of {(B*num_spatial_patches, T, self.d_model)}, got {q.shape}"
+            assert (
+                kv.shape == (B*num_spatial_patches, T, 2 * self.query_groups * self.head_dim)
+            )
+        
+        # k, v shape: [:, :, query_groups * head_dim]
+        k, v = kv.chunk(chunks=2, dim=-1)
+        if attn_mode == "spatial":
+            assert (
+                k.shape == (B*T, num_spatial_patches, self.query_groups * self.head_dim)
+            ), f"k must have shape of {(B*T, num_spatial_patches, self.query_groups * self.head_dim)}, got {k.shape}"
+            assert (
+                v.shape == (B*T, num_spatial_patches, self.query_groups * self.head_dim)
+            ), f"v must have shape of {(B*T, num_spatial_patches, self.query_groups * self.head_dim)}, got {v.shape}"
+        elif attn_mode == "temporal":
+            assert (
+                k.shape == (B*num_spatial_patches, T, self.query_groups * self.head_dim)
+            ), f"k must have shape of {(B*num_spatial_patches, T, self.query_groups * self.head_dim)}, got {k.shape}"
+            assert (
+                k.shape == (B*num_spatial_patches, T, self.query_groups * self.head_dim)
+            ), f"k must have shape of {(B*num_spatial_patches, T, self.query_groups * self.head_dim)}, got {k.shape}"
+
+        # Reshape into 4D tensors
+        # q shape: [:, :, num_heads, head_dim]
+        # k, v shape: [:, :, query_groups, head_dim]
+        if attn_mode == "spatial":
+            q = q.view(B*T, num_spatial_patches, self.num_heads, self.head_dim)
+            k = k.view(B*T, num_spatial_patches, self.query_groups, self.head_dim)
+            v = v.view(B*T, num_spatial_patches, self.query_groups, self.head_dim)
+
+            assert (
+                q.shape == (B*T, num_spatial_patches, self.num_heads, self.head_dim)
+            ), f"q must have shape of {(B*T, num_spatial_patches, self.num_heads, self.head_dim)}, got {q.shape}"
+            assert (
+                k.shape == (B*T, num_spatial_patches, self.query_groups, self.head_dim)
+            ), f"k must have shape of {(B*T, num_spatial_patches, self.query_groups, self.head_dim)}, got {k.shape}"
+            assert (
+                v.shape == (B*T, num_spatial_patches, self.query_groups, self.head_dim)
+            ), f"v must have shape of {(B*T, num_spatial_patches, self.query_groups, self.head_dim)}, got {v.shape}"
+        elif attn_mode == "temporal":
+            q = q.view(B*num_spatial_patches, T, self.num_heads, self.head_dim)
+            k = k.view(B*num_spatial_patches, T, self.query_groups, self.head_dim)
+            v = v.view(B*num_spatial_patches, T, self.query_groups, self.head_dim)
+
+            assert (
+                q.shape == (B*num_spatial_patches, T, self.num_heads, self.head_dim)
+            ), f"q must have shape of {(B*num_spatial_patches, T, self.num_heads, self.head_dim)}, got {q.shape}"
+            assert (
+                k.shape == (B*num_spatial_patches, T, self.query_groups, self.head_dim)
+            ), f"k must have shape of {(B*num_spatial_patches, T, self.query_groups, self.head_dim)}, got {k.shape}"
+            assert (
+                v.shape == (B*num_spatial_patches, T, self.query_groups, self.head_dim)
+            ), f"v must have shape of {(B*num_spatial_patches, T, self.query_groups, self.head_dim)}, got {v.shape}"
+
+        # Apply RoPE to qk tensors, same shapes from earlier
+        q = self.rope(q, grid_shape, attn_mode)
+        k = self.rope(k, grid_shape, attn_mode)
+
+        # Extend heads
+        k = self._extend_kv_heads(
+            kv_tensor=k,
+            heads_per_group=self.heads_per_group,
+            kv_heads_dim=2,
+            use_mqa=use_mqa
+        )
+        v = self._extend_kv_heads(
+            kv_tensor=v,
+            heads_per_group=self.heads_per_group,
+            kv_heads_dim=2,
+            use_mqa=use_mqa
+        )
+
+        return q, k, v
 
     def forward(
         self, 
         x: torch.Tensor,
         grid_size: Tuple[int, int, int],
+        use_mqa: bool,
         window_size: Optional[Tuple[int, int]] = None,
         padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -331,19 +493,19 @@ class Attention(nn.Module):
                 v.shape == (B, N, self.query_groups, self.head_dim)
             ), f"v must have shape of {(B, N, self.query_groups, self.head_dim)}, got {v.shape}"
 
-            # Check if kv heads need to be extended 
-            if q.size(2) != k.size(2) or q.size(2) != v.size(2):
-                # Extended kv heads for GQA
-                k = self._extend_kv_heads(
-                    kv_tensor=k, 
-                    heads_per_group=self.heads_per_group,
-                    kv_heads_dim=2,
-                )
-                v = self._extend_kv_heads(
-                    kv_tensor=v, 
-                    heads_per_group=self.heads_per_group,
-                    kv_heads_dim=2
-                )
+            # Extend kv heads
+            k = self._extend_kv_heads(
+                kv_tensor=k, 
+                heads_per_group=self.heads_per_group,
+                kv_heads_dim=2,
+                use_mqa=use_mqa
+            )
+            v = self._extend_kv_heads(
+                kv_tensor=v, 
+                heads_per_group=self.heads_per_group,
+                kv_heads_dim=2,
+                use_mqa=use_mqa,
+            )
             
             assert(
                 k.size(2) == self.num_heads or k.size(2) == 1
@@ -378,7 +540,7 @@ class Attention(nn.Module):
             ), f"attn_out must have shape of {(B, N, self.d_model)}, got {attn_out.shape}"
 
             return self.w_o(attn_out) # [B, N, d_model]
-
+        
 
 class AttentionBlock(nn.Module):
     """Attention block with attention, normalization, dropout, and residuals applied.
@@ -404,7 +566,7 @@ class AttentionBlock(nn.Module):
     ):
         super().__init__()
 
-        self.attention = Attention(d_model, num_heads, query_groups, rope_theta, patch_size)
+        self.attention = SpatioTemporalAttention(d_model, num_heads, query_groups, rope_theta, patch_size)
         self.rms_norm = RMSNorm(d_model, eps)
         self.dropout = nn.Dropout(p=dropout)
 
@@ -435,4 +597,42 @@ class AttentionBlock(nn.Module):
                     padding_mask=padding_mask,
                 )
             )
-        
+
+def test_setup_qkv(attn_mode):
+    patch_size = (2, 32, 32)
+    B, T, H, W, d_model, theta, num_heads, query_groups = (
+        4, 10, 384, 384, 744, 10000.0, 124, 1
+    )
+    attention = SpatioTemporalAttention(
+        d_model, num_heads, query_groups, theta, patch_size
+    ).to(device)
+    pt, ph, pw = patch_size
+    processed_T, processed_H, processed_W = T // pt, H // ph, W // pw
+    x = torch.randn(B, processed_T, processed_H * processed_W, d_model)
+    grid_shape = (processed_T, processed_H, processed_W)
+    q, k, v = attention._setup_qkv(x, use_mqa=True, grid_shape=grid_shape, attn_mode=attn_mode)
+    return q, k, v
+
+# SPATIAL ATTENTION
+# q, k, v shape: [B * (T // pt),  (H // ph) * (W // ph),  num_heads, head_dim]
+# q, k, v shape: [4 * (10 // 2), (384 // 32) * (384 // 32), 124, 744 // 124]
+# q, k, v shape: [20, 144, 124, 6]
+#
+# with use_mqa=True (query_groups must be == 1)
+# q has same shape
+# k, v shape: [4 * (10 // 2), (384 // 32) * (384 // 32), 1, 724 // 124]
+# k, v shape: [20, 144, 1, 6]
+
+# TEMPORAL ATTENTION
+# q, k, v shape: [B * (H // ph) * (W // pw), T // pt, num_heads, head_dim]
+# q, k, v shape: [4 * (384 // 32) * (384 // 32), 10 // 2, 124, 6]
+# q, k, v shape: [576, 5, 124, 6]
+#
+# with use_mqa=True (query_groups must b == 1)
+# q has same shape
+# k, v shape: [576, 5, 1, 6]
+
+q, k, v = test_setup_qkv("temporal")
+print(q.shape) 
+print(k.shape)
+print(v.shape)
