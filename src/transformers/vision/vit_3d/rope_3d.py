@@ -1,6 +1,6 @@
 from configs.setup_env import device, dtype
 
-from typing import Tuple
+from typing import Tuple, Literal
 
 import torch
 import torch.nn as nn
@@ -183,27 +183,38 @@ class RoPE3D(nn.Module):
     def _compute_3d_rope_embeddings(
         self, 
         x: torch.Tensor, 
-        grid_shape: Tuple[int, int, int]
+        grid_shape: Tuple[int, int, int],
+        attn_mode: Literal["spatial", "temporal"],
     ) -> torch.Tensor:
         """Compute positional embeddings over time, height, and width dimensions.
         
         Args:
             x (torch.Tensor): Input tensor of shape [B, N, num_heads, head_dim].
             grid_shape (Tuple[int, int, int]): Grid shape containing number of patches for T, H, W dimensions.
+            attn_mode (Literal["spatial", "temporal"]): Whether attention is being applied spatially or temporally.
 
         Returns:
             torch.Tensor: Query or key tensor with rotation applied.
         """
         # Get number of patches for each dimension
         grid_t, grid_h, grid_w = grid_shape
-        positions_3d = self._get_3d_grid_positions(grid_t, grid_h, grid_w) # [N, 3]
-        
-        # Get rotations via complex rotation
-        # positions_3d[:, 0] = T, positions_3d[:, 1] = H, positions_3d[:, 2] = W
-        # freqs_... = non-learnable buffers containing inverse frequences for T, H, W
-        x = self._apply_rotary_embedding_1d(x, positions_3d[:, 0], self.freqs_t, start_dim=0)
-        x = self._apply_rotary_embedding_1d(x, positions_3d[:, 1], self.freqs_h, start_dim=self.dim_per_axis)
-        x = self._apply_rotary_embedding_1d(x, positions_3d[:, 2], self.freqs_w, start_dim=2 * self.dim_per_axis)
+        # Apply RoPE based on whether we apply spatial or temporal attention
+        if attn_mode == "spatial":
+            spatial_positions = self._get_3d_grid_positions(1, grid_h, grid_w) # 1, H, W for spatial
+            x = self._apply_rotary_embedding_1d(
+                x, spatial_positions[:, 1], self.freqs_h, start_dim=self.dim_per_axis
+            )
+            x = self._apply_rotary_embedding_1d(
+                x, spatial_positions[:, 2], self.freqs_w, start_dim=2 * self.dim_per_axis
+            )
+
+        elif attn_mode == "temporal":
+            temporal_positions = self._get_3d_grid_positions(grid_t, 1, 1) # T, 1, 1 for temporal
+            x = self._apply_rotary_embedding_1d(
+                x, temporal_positions[:, 0], self.freqs_t, start_dim=0
+            )
+        else:
+            raise ValueError(f"attn_mode must be 'spatial' or 'temporal' got {attn_mode}")
         
         return x
         
@@ -211,6 +222,7 @@ class RoPE3D(nn.Module):
         self, 
         x: torch.Tensor, 
         grid_shape: Tuple[int, int, int],
+        attn_mode: Literal["spatial", "temporal"]
     ) -> torch.Tensor:
         """Apply 3D RoPE to input tensor.
         
@@ -222,16 +234,5 @@ class RoPE3D(nn.Module):
             torch.Tensor: Rotated query or key tensor with embedded positional awareness.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            _, N, _, _ = x.shape
-            
-            # Ensure N = grid_t * grid_h * grid_w
-            grid_t, grid_h, grid_w = grid_shape
-            expected_patches = grid_t * grid_h * grid_w
-            
-            if expected_patches != N:
-                raise ValueError(
-                    f"Grid shape {grid_shape} implies {expected_patches} patches, but got {N} patches"
-                )
-            
-            return self._compute_3d_rope_embeddings(x, grid_shape)
+            return self._compute_3d_rope_embeddings(x, grid_shape, attn_mode)
         
