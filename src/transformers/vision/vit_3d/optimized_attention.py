@@ -565,8 +565,73 @@ class SpatioTemporalAttention(nn.Module):
 
             return self.w_o(spatio_temporal_out)
         
+
 class SpatioTemporalAttentionBlock(nn.Module):
-    pass
+    """Attention block to apply attn, normalization, dropout, and residuals.
+    
+    Args:
+        d_model (int): Dimensionality of model embeddings.
+        num_heads (int): Number of attention heads for GQA.
+        query_groups (int): Number of query groups for GQA.
+        rope_theta (float): Exponential base of inv_freq for RoPE.
+        patch_size (Tuple[int, int, int]): Patches for T, H, W dims.
+        eps (float): Small epsilon value to maintain numerical stability in RMSNorm.
+        dropout (float): Dropout probability.
+    """
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        query_groups: int,
+        rope_theta: float,
+        patch_size: Tuple[int, int, int],
+        eps: float,
+        dropout: float
+    ):
+        super().__init__()
+
+        self.attention = SpatioTemporalAttention(
+            d_model=d_model,
+            num_heads=num_heads,
+            query_groups=query_groups,
+            rope_theta=rope_theta,
+            patch_size=patch_size
+        )
+        self.rms_norm = RMSNorm(
+            d_model, eps
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        grid_size: Tuple[int, int, int],
+        use_mqa: bool,
+        window_size: Tuple[int, int],
+        padding_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Forward pass of attention block.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, T, H*W, d_model].
+            grid_size (Tuple[int, int, int]): Tuple containing T, H, W grids.
+            use_mqa (bool): Whether to use multi-query attention or not.
+            window_size (Tuple[int, int]): Left and right windows for SWA.
+            padding_mask (Optional[torch.Tensor]): Padding tensor with shape [B, T*H*W]
+
+        Returns:
+            torch.Tensor: Output tensor with same shape as input.
+        """
+        with autocast(device_type=device.type, dtype=dtype):
+            return x + self.dropout(self.rms_norm(
+                self.attention.forward(
+                    x=x,
+                    grid_size=grid_size,
+                    use_mqa=use_mqa,
+                    window_size=window_size,
+                    padding_mask=padding_mask
+                )
+            ))
 
 def test_attention(use_pad: bool):
     d_model, num_heads, query_groups, rope_theta = 744, 124, 2, 10000.0
@@ -594,5 +659,36 @@ def test_attention(use_pad: bool):
     )
     return x_out
 
-x = test_attention(use_pad=True)
-print(x.shape)
+def test_attention_block(use_pad: bool):
+    d_model, num_heads, query_groups, rope_theta, eps, dropout = (
+        744, 124, 2, 10000.0, 1e-7, 0.15
+    )
+    patch_size = (2, 32, 32)
+    attn_block = SpatioTemporalAttentionBlock(
+        d_model, num_heads, query_groups,
+        rope_theta, patch_size, eps, dropout
+    ).to(device)
+    B, T, H, W = 4, 10, 144, 144
+    pt, ph, pw = patch_size
+    new_T, new_H, new_W = T//pt, H//ph, W//pw
+    grid_size = (new_T, new_H, new_W)
+    x = torch.randn(B, new_T, new_H * new_W, d_model).to(device)
+    if use_pad:
+        print("using padding")
+        padding_mask = torch.randint(0, 2, (B, new_T*new_H*new_W), dtype=torch.bool).to(device)
+    else:
+        print("not using padding")
+        padding_mask = None
+    x_out = attn_block.forward(
+        x=x,
+        grid_size=grid_size,
+        use_mqa=False,
+        window_size=(-1, -1),
+        padding_mask=padding_mask
+    )
+    return x_out
+
+if __name__ == "__main__":
+    x = test_attention_block(use_pad=True)
+    print(x.shape)
+
