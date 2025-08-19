@@ -7,7 +7,7 @@ from configs.transformers.vision.vit_3d.model_args.post_init import PostInitMixi
 class ModelArgs(PostInitMixin):
     """Large configuration of model arguments, containing 1.3 billion parameters."""
     patch_size: Tuple[int, int, int] = (2, 16, 16)
-    target_size: Tuple[int, int] = (32, 32)
+    target_size: Tuple[int, int] = (224, 224)
     max_frames: int = 8
     C_in: int = 3
     d_model: int = 2112
