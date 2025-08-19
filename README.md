@@ -16,16 +16,16 @@ Here we present Vats Multimodal Language Model (LM), a multi-modal language mode
 
 # 2. Deep Dive Into Model Architecture
 ---
-## Mixture of Experts Language Model
+### Mixture of Experts Language Model
 ---
-## 2D Image Vision Encoder
+### 2D Image Vision Encoder
 ---
-## 3D Video Vision Encoder
+### 3D Video Vision Encoder
 ---
-## Audio Encoder
+### Audio Encoder
 ---
-## 2D Image Diffusion Transformer
+### 2D Image Diffusion Transformer
 ---
-## 3D Video Diffusion Transformer
+### 3D Video Diffusion Transformer
 ---
-## Audio Generation
+### Audio Generation
