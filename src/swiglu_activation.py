@@ -1,6 +1,7 @@
 from configs.setup_env import (
     device,
     dtype,
+    gpu_dtypes,
     swiglu,
     use_xformers_swiglu
 )
@@ -55,17 +56,18 @@ class SwiGLUActivation(nn.Module):
         # xformers SwiGLU
         if (
             use_xformers_swiglu
+            and swiglu is not None
             and device.type == "cuda"
             and x.is_cuda
-            and x.dtype in [torch.float16, torch.bfloat16]
+            and x.dtype in gpu_dtypes
         ):
             return self.dropout(swiglu(
                 x.contiguous(),
-                self.weight1.weight.T, None,
-                self.weight2.weight.T, None,
-                self.weight3.weight.T, None
+                w1=self.weight1.weight.T, b1=None,
+                w2=self.weight2.weight.T, b2=None,
+                w3=self.weight3.weight.T, b3=None
             ))
-        # PyTorch SwiGLU fallback
+        
         else:
             warnings.warn("xformers SwiGLU not available, falling back to PyTorch SwiGLU.")
             return self._pytorch_swiglu(x)
@@ -95,4 +97,17 @@ class SwiGLUActivation(nn.Module):
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
             return self._optimized_swiglu(x)
-        
+
+
+def test_four_dim_input():
+    d_model, dropout = 744, 0.15
+    d_ffn = 4 * d_model
+    swiglu_func = SwiGLUActivation(d_model, d_ffn, dropout).to(device)
+    B, T, H, W = 1, 2, 144, 144
+    x = torch.randn(B, T, H*W, d_model).to(device)
+    x_out = swiglu_func(x)
+    return x_out
+
+if __name__ == "__main__":
+    x = test_four_dim_input()
+    print(x.shape) # [1, 2, 20736, 744]
