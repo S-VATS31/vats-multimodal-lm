@@ -46,7 +46,7 @@ class PatchEmbeddings3D(nn.Module):
         self, 
         x: torch.Tensor,
         padding_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Tuple[int, int, int], torch.Tensor, Tuple[int, int, int]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int, int]]:
         """Perform forward pass of Patch Embeddings 3D layer.
         
         Args:
@@ -55,7 +55,6 @@ class PatchEmbeddings3D(nn.Module):
         Returns:
             Tuple:
                 - torch.Tensor: Patch embeddings of shape [B, N, d_model].
-                - Tuple[int, int, int]: Processed video shape (T, H, W).
                 - torch.Tensor: Padding mask of shape [B, N].
                 - Tuple[int, int, int]: Grid size as (grid_t, grid_h, grid_w)
         """
@@ -149,7 +148,6 @@ class PatchEmbeddings3D(nn.Module):
             # Store processed dimensions for dynamic grid computation later
             processed_T = x.size(2)
             processed_H, processed_W = x.size(3), x.size(4)
-            processed_shape = (processed_T, processed_H, processed_W)
 
             # Compute total number of patches
             grid_t = processed_T // pt
@@ -207,9 +205,8 @@ class PatchEmbeddings3D(nn.Module):
                 x.shape == (B, grid_t, grid_h*grid_w, self.d_model) # [B, grid_T, grid_H * grid_W, d_model]
             ), f"x must have shape of {(B, grid_t, grid_h*grid_w, self.d_model)}, got {x.shape}"
 
-            return x, processed_shape, patch_mask, grid_size
+            return x, patch_mask, grid_size
 
-# TODO: deprecate return of processed shape since grid size is already dynamically computed
 def main():
     C_in, d_model = 3, 512
     patch_size = (2, 32, 32)
@@ -221,11 +218,11 @@ def main():
     ).to(device)
     B, T, H, W = 4, 24, 512, 512
     x = torch.randn(B, C_in, T, H, W).to(device)
-    x_out, processed_shape, patch_mask, grid_size = patch_embeddings(x)
-    return x_out, processed_shape, patch_mask, grid_size
+    x_out, patch_mask, grid_size = patch_embeddings(x)
+    return x_out, patch_mask, grid_size
 
 if __name__ == "__main__":
-    x, processed_shape, patch_mask, grid_size = main()
+    x, patch_mask, grid_size = main()
     # [B, grid_T, grid_H * grid_W, d_model]
     # B = 4
     # x_interpolate shape: [4, 3, 24, 384, 384]
@@ -240,7 +237,6 @@ if __name__ == "__main__":
     # out.shape = [4, 5, 144, 512]
     # patch_mask.shape: [B, grid_T*grid_H*grid_W]
     # patch_mask.shape = [4, 720]
-    # processed_shape = (max_frames, target_size[0], target_size[1])
     print(x.shape)
-    print(processed_shape)
+    print(grid_size)
     print(patch_mask.shape)
