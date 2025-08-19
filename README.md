@@ -17,9 +17,6 @@ Here we present Vats Multimodal Language Model (LM), a multi-modal language mode
 # 2. Deep Dive Into Model Architecture
 ---
 ### Mixture of Experts Language Model
-- 
-- 
--
 ---
 ### 2D Image Vision Encoder
 ---
@@ -32,6 +29,23 @@ Here we present Vats Multimodal Language Model (LM), a multi-modal language mode
 ### 3D Video Diffusion Transformer
 ---
 ### Audio Generation
+
+# 3.
+
+# 4.
+
+# 5. Installation
+To install the required packages, run the following:
+```bash
+# Clone the repository
+git clone https://github.com/S-VATS31/vats-multimodal-lm.git
+cd vats-multimodal-lm
+
+# Install requiremnts
+pip install -r requirements.txt
+```
+
+# 6. 
 
 # 7. License
 This repository is licensed under the MIT license.
