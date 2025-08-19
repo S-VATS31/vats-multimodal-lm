@@ -45,10 +45,18 @@ cd vats-multimodal-lm
 pip install -r requirements.txt
 ```
 
-# 6. 
+# 6. Testing
+Since the model is currently in beta, functionality is still being worked out. We will demonstrate model functionality with the model level forward passes of the LLM as well as the 3D Video Encoder. Run the following to ensure the LLM and Vision Encoder both have working forward passes:
+```bash
+# LLM Forward
+# LLM has not been trained, expect nonsense output
+python3 src/transformers/nlp/inference/generate.py
+# Vision Encoder Forward
+python3 src/transformers/vision/vit_3d/model.py
+```
 
 # 7. License
 This repository is licensed under the MIT license.
 
 # 8. Contact Us
-For any questions or issues please fill out the following form <https://forms.gle/mja1f9SdYLQFLYe26>.
+For any questions or issues please fill out the following form: <https://forms.gle/mja1f9SdYLQFLYe26>.
