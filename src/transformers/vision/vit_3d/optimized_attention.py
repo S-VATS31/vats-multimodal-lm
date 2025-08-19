@@ -18,11 +18,6 @@ from torch.amp import autocast
 from src.rms_norm import RMSNorm
 from src.transformers.vision.vit_3d.rope_3d import RoPE3D
 
-# TODO: change all assertions in _optimized_attention and _grouped_query_attention to
-# use q.size(...), x.size(...) instead of B, N, self.d_model
-# Example:
-# bad: assert x.shape == (B, N, self.d_model)
-# good: assert x.shape == (q.size(0), q.size(1), self.d_model)
 
 class SpatioTemporalAttention(nn.Module):
     """Factorized attention layer.
