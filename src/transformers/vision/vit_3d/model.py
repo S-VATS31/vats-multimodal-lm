@@ -9,7 +9,7 @@ from torch.utils.checkpoint import checkpoint
 
 from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
-from src.transformers.vision.vit_3d.optimized_attention import AttentionBlock
+from src.transformers.vision.vit_3d.optimized_attention import SpatioTemporalAttentionBlock
 from src.transformers.vision.vit_3d.patch_embeddings3d import PatchEmbeddings3D
 from configs.transformers.vision.vit_3d.model_args.model_args_large import ModelArgs
         
@@ -39,9 +39,9 @@ class TransformerBlock(nn.Module):
     ):
         super().__init__()
 
-        self.attention_block = AttentionBlock(
+        self.attention_block = SpatioTemporalAttentionBlock(
             d_model, num_heads, query_groups, 
-            rope_theta, eps, dropout, patch_size
+            rope_theta, patch_size, eps, dropout
         )
         self.gated_ffn_block = FFNBlock(
             d_model, d_ffn, dropout, eps
@@ -60,6 +60,7 @@ class TransformerBlock(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, N, d_model].
             grid_size (Tuple[int, int, int]): Grid size parameter for RoPE.
             window_size (Optional[Tuple[int, int]]): Window size for SWA.
+            padding_mask (Optional[torch.Tensor]): Padding tensor.
 
         Returns:
             torch.Tensor: Output tensor of shape [B, N, d_model].
@@ -254,3 +255,35 @@ class VideoTransformer(nn.Module):
         ), f"logits must be a 2 dimensional tensor, got {logits.dim()} dimensions"
 
         return logits # [B, num_classes]
+
+
+def test_transformer_block(use_pad: bool):
+    d_model, num_heads, query_groups, rope_theta = 744, 124, 2, 10000.0
+    d_ffn, dropout, eps, = 4*d_model, 0.15, 1e-7
+    patch_size = (2, 32, 32)
+    transformer_block = TransformerBlock(
+        d_model, num_heads, query_groups, rope_theta,
+        d_ffn, dropout, eps, patch_size
+    )
+    B, T, H, W = 1, 2, 144, 144
+    pt, ph, pw = patch_size
+    new_T, new_H, new_W = T // pt, H // ph, W // pw
+    grid_size = (new_T, new_H, new_W)
+    x = torch.randn(B, new_T, new_H*new_W, d_model).to(device)
+    if use_pad:
+        print("USING PADDING")
+        padding_mask = torch.randint(0, 2, (B, new_T*new_H*new_W), dtype=torch.bool).to(device)
+    else:
+        print("NOT USING PADDING")
+        padding_mask = None
+    x_out = transformer_block(
+        x=x,
+        grid_size=grid_size,
+        window_size=(-1, -1),
+        padding_mask=padding_mask,
+    )
+    return x_out
+
+if __name__ == "__main__":
+    x = test_transformer_block(use_pad=True)
+    print(x.shape) # [1, 1, 16, 744]
