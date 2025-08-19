@@ -57,7 +57,7 @@ class TransformerBlock(nn.Module):
         """Perform forward pass of the Transformer block.
 
         Args:
-            x (torch.Tensor): Input tensor of shape [B, N, d_model].
+            x (torch.Tensor): Input tensor of shape [B, T, H*W, d_model].
             grid_size (Tuple[int, int, int]): Grid size parameter for RoPE.
             window_size (Optional[Tuple[int, int]]): Window size for SWA.
             padding_mask (Optional[torch.Tensor]): Padding tensor.
@@ -101,19 +101,13 @@ class VideoTransformer(nn.Module):
                 d_ffn=model_args.d_ffn,
                 dropout=model_args.dropout,
                 eps=model_args.rms_norm_eps,
-                patch_size=model_args.patch_size,
-            ) for _ in range(model_args.num_layers)
+                patch_size=model_args.patch_size
+            ).to(device) for _ in range(model_args.num_layers)
         ])
 
         # Set up RMSNorm and Dropout
         self.rms_norm = RMSNorm(model_args.d_model, model_args.rms_norm_eps)
         self.dropout = nn.Dropout(p=model_args.dropout)
-
-        # Set up pool for adaptive average pooling
-        self.pool = nn.AdaptiveAvgPool1d(1) # Pool over number of patches, N
-
-        # Set up classifier
-        self.classifier = nn.Linear(model_args.d_model, model_args.num_classes)
 
         # Initialize weights
         self.apply(self._init_weights)
@@ -195,10 +189,7 @@ class VideoTransformer(nn.Module):
             if hasattr(layer.gated_ffn_block.gated_ffn, 'w2'):
                 layer.gated_ffn_block.gated_ffn.w2.weight.data.mul_(scale_factor)
         
-    def forward(
-        self, 
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Perform forward pass of the entire video transformer.
         
         Args:
@@ -207,54 +198,71 @@ class VideoTransformer(nn.Module):
         Returns:
             torch.Tensor: Returns logits of shape [B, num_classses].
         """
+        # We only need batch size for assertions as C gets projected to d_model
+        # and T, H, W get dynamically calculated through grid size
+        B = x.size(0)
         assert(
             x.dim() == 5
         ), f"x must be a 5 dimensional tensor, got {x.dim()} dimensions"
 
         # Apply patch embeddings and dropout, get processed dimensions 
-        x, _, padding_mask, grid_size = self.patch_embeddings(x)
-        x = self.dropout(x) # [B, N, d_model]
-        
-        assert(
-            x.dim() == 3
-        ), f"x must be a 3 dimenional tensor after patch embeddings, got {x.dim()} dimensions."
+        x, padding_mask, grid_size = self.patch_embeddings(x)
+        x = self.dropout(x) # [B, T, H*W, d_model]
 
-        # Pass through transformer encoder layers
+        # Grid size contains 'real' T, H, W values after padding/truncating
+        new_T, new_H, new_W = grid_size
+
+        assert (
+            x.shape == (B, new_T, new_H*new_W, self.model_args.d_model)
+        ), (
+            f"x must have shape of {(B, new_T, new_H*new_W, self.model_args.d_model)}, "
+            f"got {x.shape}"
+        )
+        assert (
+            padding_mask.shape == (B, new_T*new_H*new_W)
+        ), (
+            f"padding_mask must have shape of {(B, new_T*new_H*new_W)}, "
+            f"got {padding_mask.shape}"
+        )
+
+        # Stack transformer blocks
         for layer in self.layers:
             if self.model_args.use_checkpointing:
                 x = checkpoint(
-                    layer, 
-                    x, 
+                    layer,
+                    x,
                     grid_size,
                     self.model_args.window_size,
                     padding_mask,
                     use_reentrant=False
                 )
             else:
-                x = layer(x, grid_size, self.model_args.window_size, padding_mask)
+                x = layer(
+                    x=x,
+                    grid_size=grid_size,
+                    window_size=self.model_args.window_size,
+                    padding_mask=padding_mask
+                )
 
+        assert (
+            x.shape == (B, new_T, new_H*new_W, self.model_args.d_model)
+        ), (
+            f"x must have shape of {(B, new_T, new_H*new_W, self.model_args.d_model)}, "
+            f"got {x.shape}"
+        )
+                
         # Apply final RMSNorm
-        x = self.rms_norm(x) # [B, N, d_model]
+        x = self.rms_norm(x)
 
-        # Apply adaptive average pooling
-        x = x.transpose(1, 2) # [B, d_model, N]
-        x = self.pool(x) # [B, d_model, 1]
-        assert(
-            x.size(-1) == 1
-        ), f"x.size(-1) must be equal to 1, got {x.size(-1)}"
+        assert (
+            x.shape == (B, new_T, new_H*new_W, self.model_args.d_model)
+        ), (
+            f"x must have shape of {(B, new_T, new_H*new_W, self.model_args.d_model)}, "
+            f"got {x.shape}"
+        )
 
-        x = x.squeeze(-1) # [B, d_model]
-        assert(
-            x.dim() == 2
-        ), f"x must be a 2 dimensional tensor, got {x.dim()} dimensions"
-
-        # Get logits through classifier
-        logits = self.classifier(x)
-        assert(
-            logits.dim() == 2
-        ), f"logits must be a 2 dimensional tensor, got {logits.dim()} dimensions"
-
-        return logits # [B, num_classes]
+        return x # [B, T, H*W, d_model]
+        
 
 
 def test_transformer_block(use_pad: bool):
@@ -284,6 +292,20 @@ def test_transformer_block(use_pad: bool):
     )
     return x_out
 
+def test_entire_forward():
+    model_args = ModelArgs()
+    model = VideoTransformer(model_args).to(device)
+    B, C, T, H, W = 1, 3, 11, 144, 144
+    x = torch.randn(B, C, T, H, W).to(device)
+    x_out = model(x)
+    return x_out
+
 if __name__ == "__main__":
-    x = test_transformer_block(use_pad=True)
-    print(x.shape) # [1, 1, 16, 744]
+    x = test_entire_forward()
+    # [B, T, H*W, d_model]
+    # [1, T//pt, (H//ph) * (W//pw), 2112]
+    # [1, 8//2, (224//16) * (224//16), 2112]
+    # we do 8//2 because max frames is 8
+    # we do 224 for H and W since our target size is 224
+    # [1, 4, 196, 2112]
+    print(x.shape)
