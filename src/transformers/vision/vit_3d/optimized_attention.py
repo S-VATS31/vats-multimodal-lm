@@ -245,24 +245,92 @@ class SpatioTemporalAttention(nn.Module):
         ), f"x must have 4 dimensions, got {x.dim()} dimensions."
         # Get B, T, H*W dims to use later
         B, T, num_spatial_patches, _ = x.shape
-        # q, k, v shape after transpose: [B, num_heads, N, head_dim]
+        # q, k, v shape after transpose: [:, num_heads, :, head_dim]
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
+        if attn_mode == "spatial":
+            assert (
+                query.shape == (B*T, self.num_heads, num_spatial_patches, self.head_dim)
+            ), (
+                f"query must have shape of {(B*T, self.num_heads, num_spatial_patches, self.head_dim)}, " 
+                f" for spatial attention, got {query.shape}."
+            )
+            assert (
+                key.shape == (B*T, self.num_heads, num_spatial_patches, self.head_dim) or
+                key.shape == (B*T, 1, num_spatial_patches, self.head_dim)
+            ), (
+                f"key must have shape of {(B*T, self.num_heads, num_spatial_patches, self.head_dim)} or "
+                f"{(B*T, 1, num_spatial_patches, self.head_dim)} for spatial attention, got {key.shape}"
+            )
+            assert (
+                value.shape == (B*T, self.num_heads, num_spatial_patches, self.head_dim) or
+                value.shape == (B*T, 1, num_spatial_patches, self.head_dim)
+            ), (
+                f"value must have shape of {(B*T, self.num_heads, num_spatial_patches, self.head_dim)} or "
+                f"{(B*T, 1, num_spatial_patches, self.head_dim)} for spatial attention, got {value.shape}"
+            )
+
+        elif attn_mode == "temporal":
+            assert (
+                query.shape == (B*num_spatial_patches, self.num_heads, T, self.head_dim)
+            ), (
+                f"query must have shape of {(B*num_spatial_patches, self.num_heads, T, self.head_dim)} "
+                f"for spatial attention, got {query.shape}."
+            )
+            assert (
+                key.shape == (B*num_spatial_patches, self.num_heads, T, self.head_dim) or
+                key.shape == (B*num_spatial_patches, 1, T, self.head_dim)
+            ), (
+                f"key must have shape of {(B*num_spatial_patches, self.num_heads, T, self.head_dim)} or "
+                f"{(B*num_spatial_patches, 1, T, self.head_dim)}, got {key.shape}."
+            )
+            assert (
+                value.shape == (B*num_spatial_patches, self.num_heads, T, self.head_dim) or
+                value.shape == (B*num_spatial_patches, 1, T, self.head_dim)
+            ), (
+                f"key must have shape of {(B*num_spatial_patches, self.num_heads, T, self.head_dim)} or "
+                f"{(B*num_spatial_patches, 1, T, self.head_dim)}, got {value.shape}."
+            )
+
         # Set up padding mask to be broadcastable
         if padding_mask is not None:
-            # Reshape mask to [B*T, H*W] for spatial attention
             if attn_mode == "spatial":
-                padding_mask = padding_mask.view(B*T, num_spatial_patches)
-            # Reshape mask to [B*H*W, T] for temporal attention
+                padding_mask = padding_mask.view(B*T, num_spatial_patches) # [B*T, H*W]
+                assert (
+                    padding_mask.shape == (B*T, num_spatial_patches)
+                ), f"padding_mask must have shape of {(B*T, num_spatial_patches)}, got {padding_mask.shape}"
             elif attn_mode == "temporal":
-                padding_mask = padding_mask.view(-1, T)
+                padding_mask = padding_mask.view(-1, T) # [B*H*W, T]
+                assert (
+                    padding_mask.shape == (B*num_spatial_patches, T)
+                ), f"padding_mask must have shape of {(B*num_spatial_patches, T)}, got {padding_mask.shape}"
             # True = valid positions, False = padded positions
             attention_mask = padding_mask.bool()
             attention_mask = attention_mask[:, None, None, :] # [:, 1, 1, :]
         else:
             attention_mask = None
+
+        # check mask shape and dtype
+        if attention_mask is not None:
+            assert (
+                attention_mask.dtype == torch.bool
+            ), f"attention mask must be a bool tensor, got {attention_mask.dtype}"
+            if attn_mode == "spatial":
+                assert (
+                    attention_mask.shape == (B*T, 1, 1, num_spatial_patches)
+                ), (
+                    f"attention mask must have shape {(B*T, 1, 1, num_spatial_patches)} "
+                    f"for spatial attention, got {attention_mask.shape}"
+                )
+            elif attn_mode == "temporal":
+                assert (
+                    attention_mask.shape == (B*num_spatial_patches, 1, 1, T)
+                ),(
+                    f"attention mask must have shape {(B*T, 1, 1, num_spatial_patches)} "
+                    f"for temporal attention, got {attention_mask.shape}"
+                )
 
         # Apply PyTorch SDPA
         attn_out = F.scaled_dot_product_attention(
@@ -270,15 +338,46 @@ class SpatioTemporalAttention(nn.Module):
             attn_mask=attention_mask,
             is_causal=False,
             enable_gqa=False
-        ) # [B, num_heads, N, head_dim]
+        ) # [:, num_heads, :, head_dim]
+
+        if attn_mode == "spatial":
+            assert (
+                attn_out.shape == (B*T, self.num_heads, num_spatial_patches, self.head_dim)
+            ), (
+                f"attn_out must have shape of {(B*T, self.num_heads, num_spatial_patches, self.head_dim)} "
+                f"for spatial attention, got {attn_out.shape}"
+            )
+        elif attn_mode == "temporal":
+            assert (
+                attn_out.shape == (B*num_spatial_patches, self.num_heads, T, self.head_dim)
+            ), (
+                f"attn_out must have shape of {(B*num_spatial_patches, self.num_heads, T, self.head_dim)} "
+                f"for spatial attention, got {attn_out.shape}"
+            )
 
         # Reshape output back to 3D tensor
+        # In the forward pass we will reshape back to 4 dimensional tensor as [B, T, H*W, d_model]
         attn_out = (
             attn_out
-            .transpose(1, 2) # [B, N, num_heads, head_dim]
+            .transpose(1, 2) # [:, :, num_heads, head_dim]
             .contiguous()
             .view(query.size(0), query.size(2), self.d_model)
-        ) # [B, N, d_model]
+        ) # [:, :, d_model]
+        
+        if attn_mode == "spatial":
+            assert (
+                attn_out.shape == (B*T, num_spatial_patches, self.d_model)
+            ), (
+                f"attn_out must have shape of {(B*T, num_spatial_patches, self.d_model)}, "
+                f"for spatial attention, got {attn_out.shape}"
+            )
+        elif attn_mode == "temporal":
+            assert (
+                attn_out.shape == (B*num_spatial_patches, T, self.d_model)
+            ), (
+                f"attn_out must have shape of {(B*num_spatial_patches, T, self.d_model)}, "
+                f"for spatial attention, got {attn_out.shape}"
+            )
 
         return attn_out
     
@@ -539,7 +638,7 @@ class SpatioTemporalAttention(nn.Module):
             padding_mask (Optional[torch.Tensor]): Padding mask of shape [B, N].
 
         Returns:
-            torch.Tensor: Output tensor of shape [B, N, d_model].
+            torch.Tensor: Output tensor of shape [B, T, H*W, d_model].
         """
         with autocast(device_type=device.type, dtype=dtype):
             spatial_out = self._spatial_attention(
@@ -548,17 +647,17 @@ class SpatioTemporalAttention(nn.Module):
                 grid_shape=grid_size,
                 window_size=window_size,
                 padding_mask=padding_mask
-            )
+            ) # [B*grid_T, H*W, d_model]
             spatial_out = spatial_out.view(
                 x.size(0), grid_size[0], -1, self.d_model
-            )
+            ) # [B, grid_T, H*W, d_model]
             temporal_out = self._temporal_attention(
                 x=spatial_out,
                 use_mqa=use_mqa,
                 grid_shape=grid_size,
                 window_size=window_size,
                 padding_mask=padding_mask
-            )
+            ) # [B*H*W, grid_T, d_model]
             spatio_temporal_out = temporal_out.view(
                 x.size(0), grid_size[0], -1, self.d_model
             ) # [B, T, H*W, d_model]
@@ -679,7 +778,7 @@ def test_attention_block(use_pad: bool):
     else:
         print("not using padding")
         padding_mask = None
-    x_out = attn_block.forward(
+    x_out = attn_block(
         x=x,
         grid_size=grid_size,
         use_mqa=False,
@@ -689,6 +788,5 @@ def test_attention_block(use_pad: bool):
     return x_out
 
 if __name__ == "__main__":
-    x = test_attention_block(use_pad=True)
+    x = test_attention_block(use_pad=True) # [B, 10//2, 144//12 * 144//12, d_model]
     print(x.shape)
-
