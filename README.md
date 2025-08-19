@@ -34,4 +34,7 @@ Here we present Vats Multimodal Language Model (LM), a multi-modal language mode
 ### Audio Generation
 
 # 7. License
-This repository is
+This repository is licensed under the MIT license.
+
+# 8. Contact Us
+For any questions or issues please fill out the following form <https://forms.gle/mja1f9SdYLQFLYe26>.
