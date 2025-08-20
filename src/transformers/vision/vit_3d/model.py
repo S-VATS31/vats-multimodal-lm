@@ -260,10 +260,18 @@ class VideoTransformer(nn.Module):
             f"x must have shape of {(B, new_T, new_H*new_W, self.model_args.d_model)}, "
             f"got {x.shape}"
         )
-
-        return x # [B, T, H*W, d_model]
         
+        # Reshape to 3D tensor since LLMs expect [B, N, d_model]
+        x = x.view(B, -1, self.model_args.d_model)
+        assert (
+            x.shape == (B, new_T*new_H*new_W, self.model_args.d_model)
+        ), (
+            f"x must have shape of {(B, new_T*new_H*new_W, self.model_args.d_model)}, "
+            f"got {x.shape}"
+        )
 
+        return x # [B, T*H*W, d_model]
+        
 
 def test_transformer_block(use_pad: bool):
     d_model, num_heads, query_groups, rope_theta = 744, 124, 2, 10000.0
@@ -302,10 +310,10 @@ def test_entire_forward():
 
 if __name__ == "__main__":
     x = test_entire_forward()
-    # [B, T, H*W, d_model]
-    # [1, T//pt, (H//ph) * (W//pw), 2112]
-    # [1, 8//2, (224//16) * (224//16), 2112]
+    # [B, T*H*W, d_model]
+    # [1, T//pt * (H//ph) * (W//pw), 2112]
+    # [1, 8//2 * (224//16) * (224//16), 2112]
     # we do 8//2 because max frames is 8
     # we do 224 for H and W since our target size is 224
-    # [1, 4, 196, 2112]
+    # [1, 784, 2112]
     print(x.shape)
