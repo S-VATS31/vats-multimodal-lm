@@ -185,7 +185,7 @@ class SpatioTemporalAttention(nn.Module):
                     qkv_valid,
                     cu_seqlens,
                     max_seqlen,
-                    causal=False,
+                    causal=True,
                     softmax_scale=1.0 / (math.sqrt(self.head_dim)),
                     window_size=window_size,
                 ) # [B*N, num_heads, head_dim]
