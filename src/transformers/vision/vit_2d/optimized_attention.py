@@ -540,20 +540,92 @@ class SpatialAttention(nn.Module):
 
 
 class SpatialAttentionBlock(nn.Module):
-    def __init__(self):
-        pass
+    """Spatial attention block with residuals, normalization, and dropout.
+    
+    Args:
+        d_model (int): Dimensionality of model embeddings.
+        num_heads (int): Number of attention heads for GQA.
+        query_groups (int): Number of query groupsf for GQA.
+        rope_theta (float): Exponential base of inv freq for RoPE.
+        target_size (int): Target height and width images will be reshaped to.
+        patch_size (int): Height and width square patches.
+        softmax_scale (float): Scaling factor for attention scores.
+        use_windowed_attn (bool): Whether to use sliding window attention or not.
+        use_proj_bias (bool): Whether to use bias for projection matrices.
+        use_fused_proj (bool): Whether to use single qkv projection or seperate projections.
+        eps (float): Small epsilon value to prevent numerical instability.
+        dropout (float): Dropout probability.
+    """
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        query_groups: int,
+        rope_theta: float,
+        target_size: int,
+        patch_size: int,
+        softmax_scale: int,
+        use_windowed_attn: bool,
+        use_proj_bias: bool,
+        use_fused_proj: bool,
+        eps: float,
+        dropout: float,
+    ):
+        super().__init__()
 
-    def forward(self):
+        self.attention = SpatialAttention(
+            d_model=d_model,
+            num_heads=num_heads,
+            query_groups=query_groups,
+            rope_theta=rope_theta,
+            target_size=target_size,
+            patch_size=patch_size,
+            softmax_scale=softmax_scale,
+            use_windowed_attn=use_windowed_attn,
+            use_proj_bias=use_proj_bias,
+            use_fused_proj=use_fused_proj
+        )
+        self.rms_norm = RMSNorm(
+            d_model=d_model, eps=eps
+        )
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        use_mqa: bool,
+        left_window: int,
+        right_window: int,
+    ) -> torch.Tensor:
+        """Forward pass of attention block.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, H*W, d_model].
+            use_mqa (bool): Whether to use MQA or not.
+            left_window (int): Left window for SWA.
+            right_window (int): Right window for SWA.
+
+        Returns:
+            torch.Tensor: Output tensor of same shape as input.
+        """
         with autocast(device_type=device.type, dtype=dtype):
-            pass
+            return x + self.dropout(self.rms_norm(
+                self.attention(
+                    x=x,
+                    use_mqa=use_mqa,
+                    left_window=left_window,
+                    right_window=right_window
+                )
+            ))
 
-def test_attention():
+def test_attention_block():
     d_model, num_heads, query_groups = 512, 32, 8
     rope_theta, target_size, patch_size = 10000.0, 144, 16
     softmax_scale = 1 / (d_model // num_heads) ** 0.5
-    attention = SpatialAttention(
+    eps, dropout = 1e-7, 0.15
+    attention = SpatialAttentionBlock(
         d_model, num_heads, query_groups, rope_theta, target_size, 
-        patch_size, softmax_scale, False, False, True
+        patch_size, softmax_scale, False, False, True, eps, dropout
     ).to(device)
     B = 1
     grid_size = target_size // patch_size
@@ -563,5 +635,8 @@ def test_attention():
     return x_out
 
 if __name__ == "__main__":
-    x = test_attention()
+    x = test_attention_block()
+    # [1, num_patches, 512]
+    # num_patches = (target_size // patch_size) ** 2
     print(x.shape)
+    
