@@ -1,7 +1,5 @@
 from configs.setup_env import device, dtype
 
-from typing import Tuple
-
 import torch
 import torch.nn as nn
 from torch.amp import autocast
@@ -9,167 +7,173 @@ from torch.utils.checkpoint import checkpoint
 
 from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
+from src.transformers.vision.vit_2d.optimized_attention import SpatialAttentionBlock
 from src.transformers.vision.vit_2d.patch_embeddings2d import PatchEmbeddings2D
-from src.transformers.vision.vit_2d.optimized_attention import GQABlock, RoPE
-from configs.transformers.vision.vit_2d.model_args.model_args_large import ModelArgs
+from configs.transformers.vision.vit_2d.model_args.model_args_medium import ModelArgs
 
-class TransformerEncoder(nn.Module):
-    """Encoder block where attention block and FFN blocks are stacked.
+class SpatialTransformerBlock(nn.Module):
+    """Transformer block stacking attn/ffn blocks.
 
     Args:
-        d_model (int): Dimensionality of the model's input/output representations.
-        num_heads (int): Number of attention heads for queries.
-        query_groups (int): Number of key/value groups (heads).
-        rope_module (nn.Module): An instance of the RoPE module for applying rotary embeddings.
-        d_ffn (int): Dimensionality of the feed-forward network. Typically, d_ffn = 4 * d_model.
-        eps: (float): Small value to maintain numerical stability in RMSNorm.
-        dropout (float): Regularizes the model and helps prevent overfitting.
+        d_model (int): Dimensionality of model embeddings.
+        num_heads (int): Number of attention heads for GQA.
+        query_groups (int): Number of query groupsf for GQA.
+        rope_theta (float): Exponential base of inv freq for RoPE.
+        target_size (int): Target height and width images will be reshaped to.
+        patch_size (int): Height and width square patches.
+        softmax_scale (float): Scaling factor for attention scores.
+        use_windowed_attn (bool): Whether to use sliding window attention or not.
+        use_proj_bias (bool): Whether to use bias for projection matrices.
+        use_fused_proj (bool): Whether to use single qkv projection or seperate projections.
+        eps (float): Small epsilon value to prevent numerical instability.
+        dropout (float): Dropout probability.
+        d_ffn (int): Dimensionality of the feed forward network.
     """
     def __init__(
         self,
         d_model: int,
         num_heads: int,
         query_groups: int,
-        rope_module: RoPE,
-        d_ffn: int,
+        rope_theta: float,
+        target_size: int,
+        patch_size: int,
+        softmax_scale: float,
+        use_windowed_attn: bool,
+        use_proj_bias: bool,
+        use_fused_proj: bool,
         eps: float,
         dropout: float,
+        d_ffn: int
     ):
         super().__init__()
 
-        self.attn_block = GQABlock(d_model, num_heads, query_groups, rope_module, eps, dropout)
-        self.ffn_block = FFNBlock(d_model, d_ffn, eps, dropout)
+        self.attention_block = SpatialAttentionBlock(
+            d_model=d_model,
+            num_heads=num_heads,
+            query_groups=query_groups,
+            rope_theta=rope_theta,
+            target_size=target_size,
+            patch_size=patch_size,
+            softmax_scale=softmax_scale,
+            use_windowed_attn=use_windowed_attn,
+            use_proj_bias=use_proj_bias,
+            use_fused_proj=use_fused_proj,
+            eps=eps,
+            dropout=dropout
+        )
+        self.ffn_block = FFNBlock(
+            d_model=d_model,
+            d_ffn=d_ffn,
+            dropout=dropout,
+            eps=eps
+        )
 
-    def forward(self, x: torch.Tensor, window_size: Tuple[int, int]) -> torch.Tensor:
-        """Perform forward pass of the Transformer Encoder.
-
+    def forward(
+        self,
+        x: torch.Tensor,
+        use_mqa: bool,
+        left_window: int,
+        right_window: int
+    ) -> torch.Tensor:
+        """Forward pass of the transformer block.
+        
         Args:
-            x (torch.Tensor): Input tensor of shape [B, T, d_model].
+            x (torch.Tensor): Input tensor of shape [B, H*W, d_model].
+            use_mqa (bool): Whether to use MQA or not.
+            left_window (int): Left window for SWA.
+            right_window (int): Right window for SWA.
 
         Returns:
-            torch.Tensor: Transformed output tensor of same shape.
+            torch.Tensor: Output tensor of same shape as input.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return self.ffn_block(self.attn_block(x, window_size))
+            return self.ffn_block(
+                self.attention_block(
+                    x=x,
+                    use_mqa=use_mqa,
+                    left_window=left_window,
+                    right_window=right_window
+                )
+            )
 
-
-class VisionTransformer(nn.Module):
-    """Complete Vision Transformer class where the encoder blocks will be stacked.
-
-    Args:
-        model_args (ModelArgs): Dataclass containing all model hyperparameters.
-    """
+class ImageEncoderTransformer(nn.Module):
     def __init__(self, model_args: ModelArgs):
         super().__init__()
 
         self.model_args = model_args
 
-        # Patch embeddings
+        # Set up patch embeddings
         self.patch_embeddings = PatchEmbeddings2D(
-            img_size=model_args.img_size,
             patch_size=model_args.patch_size,
+            target_size=model_args.target_size,
             C_in=model_args.C_in,
             d_model=model_args.d_model
-        )
+        ).to(device)
 
-        # RoPE
-        head_dim = model_args.d_model // model_args.num_heads
-        self.rope = RoPE(
-            head_dim=head_dim,
-            img_size=model_args.img_size,
-            patch_size=model_args.patch_size,
-            base=model_args.rope_base
-        )
-
-        # Stack Transformer layers
-        self.transformer_layers = nn.ModuleList([
-            TransformerEncoder(
+        # Set up transformer blocks
+        self.layers = nn.ModuleList([
+            SpatialTransformerBlock(
                 d_model=model_args.d_model,
                 num_heads=model_args.num_heads,
                 query_groups=model_args.query_groups,
-                rope_module=self.rope,
-                d_ffn=model_args.d_ffn,
+                rope_theta=model_args.rope_theta,  # ADD TO MODEL ARGS
+                target_size=model_args.target_size,  # ADD TO MODEL ARGS
+                patch_size=model_args.patch_size,
+                softmax_scale=model_args.softmax_scale,  # ADD TO MODEL ARGS
+                use_windowed_attn=model_args.use_windowed_attn,  # ADD TO MODEL ARGS
+                use_proj_bias=model_args.use_proj_bias,  # ADD TO MODEL ARGS
+                use_fused_proj=model_args.use_fused_proj,  # ADD TO MODEL ARGS
                 eps=model_args.rms_norm_eps,
-                dropout=model_args.dropout
-            ) for _ in range(model_args.num_layers)
+                dropout=model_args.dropout,
+                d_ffn=model_args.d_ffn
+            ).to(device) for _ in range(model_args.num_layers)
         ])
 
-        # RMSNorm
-        self.rms_norm = RMSNorm(model_args.d_model, model_args.rms_norm_eps)
-
-        # Adaptive average pooling
-        # output size of 1 as we aggregate all predictions into a single vector
-        self.pool = nn.AdaptiveAvgPool1d(1)
-
-        # Classification head
-        self.classifier = nn.Linear(model_args.d_model, model_args.num_classes)
-
-        # Dropout
+        # Set up final RMSNorm and dropout
+        self.rms_norm = RMSNorm(model_args.d_model, model_args.rms_norm_eps).to(device)
         self.dropout = nn.Dropout(p=model_args.dropout)
 
         # Initialize weights
         self.apply(self._init_weights)
 
-    def _init_weights(self, module: nn.Linear) -> None:
-        """Initialize weights using Xavier initialization.
 
-        Args:
-            module (nn.Linear): Module to initialize.
-        """
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
+    def _init_weights(self, module) -> None:
+        pass
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Perform forward pass through the Vision Transformer.
-
+        """Forward pass of image encoder.
+        
         Args:
             x (torch.Tensor): Input tensor of shape [B, C, H, W].
 
         Returns:
-            torch.Tensor: Class logits of shape [B, num_classes].
+            torch.Tensor: Output tensor with same shape.
         """
-        with autocast(device_type=device.type, dtype=dtype):
-            assert (
-                x.dim() == 4
-            ), f"x must be a 4 dimensional tensor, got {x.dim()} dimensions"
-            
-            # Patch embeddings + dropout
-            x = self.dropout(self.patch_embeddings(x)) # [B, num_patches, d_model]
-            assert (
-                x.dim() == 3
-            ), f"x must be a 3 dimensional tensor, got {x.dim()} dimensions."
+        assert (
+            x.dim() == 4
+        ), f"x must have 4 dimensions, got {x.dim()} dimensions."
+        x = self.dropout(self.patch_embeddings(x)) # [B, H*W, d_model]
 
-            # Pass through transformer layers
-            for layer in self.transformer_layers:
-                if self.model_args.use_checkpointing:
-                    x = checkpoint(
-                        layer, 
-                        x, 
-                        self.model_args.window_size, 
-                        use_reentrant=False
-                    ) # [B, num_patches, d_model]
-                else:
-                    x = layer(x, self.model_args.window_size)
+        # Stack transformer blocks
+        for layer in self.layers:
+            if self.model_args.use_checkpointing:
+                x = checkpoint(
+                    layer,
+                    x,
+                    self.model_args.use_mqa,
+                    self.model_args.left_window,
+                    self.model_args.right_window,
+                    use_reentrant=False
+                )
+            else:
+                x = layer(
+                    x=x,
+                    use_mqa=self.model_args.use_mqa,
+                    left_window=self.model_args.left_window,
+                    right_window=self.model_args.right_window,
+                )
+        
+        # Apply final RMSNorm
+        x = self.rms_norm(x)
 
-            # Apply final RMSNorm
-            x = self.rms_norm(x) # [B, num_patches, d_model]
-            x = x.transpose(1, 2) # [B, d_model, num_patches]
-            x = self.pool(x) # [B, d_model, 1]
-            assert (
-                x.size(-1) == 1
-            ), f"x.size(-1) must be equal to 1, got {x.size(-1)}"
-
-            x = x.squeeze(-1) # [B, d_model]
-            assert (
-                x.dim() == 2
-            ), f"x must be a 2 dimensional tensor, got {x.dim()}"
-            
-            # Get output logits
-            logits = self.classifier(x)
-            assert (
-                logits.dim() == 2
-            ), f"logits must be a 2 dimensional tensor, got {logits.dim()}"
-
-            return logits # [B, num_classes]
+        return x
