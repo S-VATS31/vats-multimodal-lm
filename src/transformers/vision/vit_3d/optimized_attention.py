@@ -166,8 +166,8 @@ class SpatioTemporalAttention(nn.Module):
                 # Flatten packed tensor
                 qkv_flattened = (
                     qkv_packed.view(-1, self.num_heads, 3, self.head_dim)
-                    .transpose(1, 2)
                     .contiguous()
+                    .transpose(1, 2)
                 ) # [B * N, 3, num_heads, head_dim]
 
                 # Index by valid patches - only keep valid patches for flash attention
