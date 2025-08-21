@@ -10,7 +10,6 @@ Here we present Vats Multimodal Language Model (LM), a multi-modal language mode
 - **2D Image Processing:** For image processing, we use an encoder-only 2D Vision Transformer (ViT) utilizing spatial attention where we apply Flash Attention V2, GQA, and SWA over the flattened height and width dimensions. We use a Conv2D layer to create image patches.
 - **3D Video Processing:** For video processing, we use an encoder-only 3D ViT utilizing factorized attention. A variant of classic spatio-temporal attention where we apply attention spatially as 1 x H x W and temporal attention as T x 1 x 1. We do this to avoid quadratic complexity all dimensions. Once again, we use a convolutional layer, a Conv3D layer to be exact, to create video patches containing pT frames, pH pixels, and pW pixels.
 - **Audio Processing:**
-- **2D Image Generation:** For generating 2D images, we first take in the input prompt and essentialy 'enrich' it using the LLM from earlier. This allows the prompt that will be encoded to be more feature-rich as well as less ambigious. The enriched prompt is then passed to the text encoder, which will be given to the latent diffusion model. We can finally then decode the output using a Convolutional Neural Network (CNN) via convolutions and residual blocks.
 - **3D Video Generation:**
 - **Audio Generation:**
 
@@ -51,7 +50,7 @@ Since the model is currently in beta, functionality is still being worked out. W
 # LLM Forward
 # LLM has not been trained, expect nonsense output
 python3 src/transformers/nlp/inference/generate.py
-# Vision Encoder Forward
+# Video Encoder Forward
 python3 src/transformers/vision/vit_3d/model.py
 ```
 
