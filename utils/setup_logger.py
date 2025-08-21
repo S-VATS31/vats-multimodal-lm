@@ -22,7 +22,7 @@ def setup_logger(name: str, log_file: str, level: int) -> logging.Logger:
     # Avoid adding duplicate handlers if logger is reused
     if not logger.handlers:
         handler = logging.FileHandler(os.path.join(log_dir, log_file))
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
