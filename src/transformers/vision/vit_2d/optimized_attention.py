@@ -305,6 +305,7 @@ class SpatialAttention(nn.Module):
 
     def _optimized_attention(
         self,
+        x: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
@@ -314,6 +315,7 @@ class SpatialAttention(nn.Module):
         """Optimized attention using Flash Attention V2, SWA, and GQA or MQA.
         
         Args:
+            x (torch.Tensor): Input tensor of shape [B, H*W, d_model] used only for shape validation.
             query (torch.Tensor): Query tensor of shape [B, H*W, num_heads, head_dim].
             key (torch.Tensor): Key tensor of shape [B, H*W, num_heads, head_dim].
             value (torch.Tensor): Value tensor of shape [B, H*W, num_heads, head_dim].
@@ -371,10 +373,11 @@ class SpatialAttention(nn.Module):
             return attn_out
 
         else:
-            return self._torch_attention(query, key, value)
+            return self._torch_attention(x, query, key, value)
 
     def _torch_attention(
         self,
+        x: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
@@ -382,6 +385,7 @@ class SpatialAttention(nn.Module):
         """Apply PyTorch scaled dot product attention.
         
         Args:
+            x (torch.Tensor): Input tensor to be used for shape validation; shape: [B, H*W, d_model].
             query (torch.Tensor): Query tensor of shape [B, H*W, num_heads, head_dim].
             key (torch.Tensor): Key tensor of shape [B, H*W, num_heads, head_dim].
             value (torch.Tensor): Value tensor of shape [B, H*W, num_heads, head_dim].
@@ -389,10 +393,34 @@ class SpatialAttention(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape [B, H*W, d_model].
         """
+        # We only pass input tensor for shape validation across steps
+        B, num_spatial_patches, _ = x.shape
+        
         # Transpose to [B, num_heads, H*W, head_dim]
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
+        
+        assert (
+            query.shape == (B, self.num_heads, num_spatial_patches, self.head_dim)
+        ), (
+            f"query must have shape of {(B, self.num_heads, num_spatial_patches, self.head_dim)}, "
+            f"got {query.shape}"
+        )
+        assert (
+            key.shape == (B, self.num_heads, num_spatial_patches, self.head_dim) or
+            key.shape == (B, 1, num_spatial_patches, self.head_dim)
+        ), (
+            f"key must have shape of {(B, self.num_heads, num_spatial_patches, self.head_dim)} or "
+            f"{(B, 1, num_spatial_patches, self.head_dim)}, got {key.shape}"
+        )
+        assert (
+            value.shape == (B, self.num_heads, num_spatial_patches, self.head_dim) or
+            value.shape == (B, 1, num_spatial_patches, self.head_dim)
+        ), (
+            f"value must have shape of {(B, self.num_heads, num_spatial_patches, self.head_dim)} or "
+            f"{(B, 1, num_spatial_patches, self.head_dim)}, got {value.shape}"
+        )
 
         # SDPA
         attn_out = F.scaled_dot_product_attention(
@@ -403,13 +431,24 @@ class SpatialAttention(nn.Module):
             enable_gqa=False # we do this manually
         ) # [B, num_heads, H*W, head_dim]
 
+        assert (
+            attn_out.shape == (B, self.num_heads, num_spatial_patches, self.head_dim)
+        ), (
+            f"attn_out must have shape of {(B, self.num_heads, num_spatial_patches, self.head_dim)}, "
+            f"got {attn_out.shape}"
+        )
+
         # Reshape back to 3D tensor
         attn_out = (
             attn_out
             .transpose(1, 2)
             .contiguous()
             .view(query.size(0), query.size(2), -1)
-        )
+        ) # [B, H*W, d_model]
+
+        assert (
+            attn_out.shape == (B, num_spatial_patches, self.d_model)
+        ), f"attn_out must have shape of {(B, num_spatial_patches, self.d_model)}, got {attn_out.shape}"
 
         return attn_out
 
@@ -434,7 +473,8 @@ class SpatialAttention(nn.Module):
         q, k, v = self._setup_qkv(x, use_mqa=use_mqa)
         # Get attention output
         spatial_out = self._optimized_attention(
-            query=q, 
+            x=x,
+            query=q,
             key=k, 
             value=v,
             left_window=left_window,
@@ -469,26 +509,66 @@ class SpatialAttention(nn.Module):
         if self.use_fused_proj:
             # qkv shape: [B, H*W, num_heads*head_dim + 2*query_groups*head_dim]
             qkv = self.qkv_proj(x)
+            assert (
+                qkv.shape == (
+                    B, num_spatial_patches, self.num_heads*self.head_dim + 2*self.query_groups*self.head_dim
+                )
+            ), f"qkv must have shape of {(
+                B, num_spatial_patches, self.num_heads*self.head_dim + 2*self.query_groups*self.head_dim
+            )}, got {qkv.shape}"
+
             # q shape: [B, H*W, num_heads*head_dim]
             # kv shape: [B, H*W, 2*query_groups*head_dim]
             q, kv = torch.split(
                 qkv, [self.num_heads*self.head_dim, 2*self.query_groups*self.head_dim], dim=-1
             )
+            assert (
+                kv.shape == (B, num_spatial_patches, 2*self.query_groups*self.head_dim)
+            ), f"kv must have shape of {(B, num_spatial_patches, 2*self.query_groups*self.head_dim)}."
+
             # k, v shape: [B, H*W, query_groups*head_dim]
             k, v = kv.chunk(chunks=2, dim=-1)
         else:
             q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+
+        # Assert together
+        assert (
+                q.shape == (B, num_spatial_patches, self.num_heads*self.head_dim)
+            ), f"q must have shape of {(B, num_spatial_patches, self.num_heads*self.head_dim)}, got {q.shape}"
+        assert (
+                k.shape == (B, num_spatial_patches, self.query_groups*self.head_dim)
+            ), f"k must have shape of {(B, num_spatial_patches, self.query_groups*self.head_dim)}, got {k.shape}"
+        assert (
+                v.shape == (B, num_spatial_patches, self.query_groups*self.head_dim)
+        ), f"v must have shape of {(B, num_spatial_patches, self.query_groups*self.head_dim)}, got {v.shape}"
 
         # Reshape into 4D tensors
         q = q.view(B, num_spatial_patches, self.num_heads, self.head_dim)
         k = k.view(B, num_spatial_patches, self.query_groups, self.head_dim)
         v = v.view(B, num_spatial_patches, self.query_groups, self.head_dim)
 
+        assert (
+            q.shape == (B, num_spatial_patches, self.num_heads, self.head_dim)
+        ), f"q must have shape of {(B, num_spatial_patches, self.num_heads, self.head_dim)}, got {q.shape}"
+        assert (
+            k.shape == (B, num_spatial_patches, self.query_groups, self.head_dim)
+        ), f"k must have shape of {(B, num_spatial_patches, self.query_groups, self.head_dim)}, got {k.shape}"
+        assert (
+            v.shape == (B, num_spatial_patches, self.query_groups, self.head_dim)
+        ), f"v must have shape of {(B, num_spatial_patches, self.query_groups, self.head_dim)}, got {v.shape}"
+
         # Apply RoPE; forward expects [B, H*W, num_heads, head_dim]
         # q shape: [B, H*W, num_heads, head_dim]
         # k shape: [B, H*W, query_groups, head_dim]
         q = self.rope(q)
         k = self.rope(k)
+
+        assert (
+            q.shape == (B, num_spatial_patches, self.num_heads, self.head_dim)
+        ), f"q must have shape of {(B, num_spatial_patches, self.num_heads, self.head_dim)}, got {q.shape}"
+        assert (
+            k.shape == (B, num_spatial_patches, self.query_groups, self.head_dim)
+        ), f"q must have shape of {(B, num_spatial_patches, self.query_groups, self.head_dim)}, got {q.shape}"
 
         # Extend kv heads
         k = self._extend_kv_heads(
@@ -502,6 +582,21 @@ class SpatialAttention(nn.Module):
             repeats=self.heads_per_group,
             dim=2,
             use_mqa=use_mqa
+        )
+
+        assert (
+            k.shape == (B, num_spatial_patches, self.num_heads, self.head_dim) or
+            k.shape == (B, num_spatial_patches, 1, self.head_dim)
+        ), (
+            f"k must have shape of {(B, num_spatial_patches, self.num_heads, self.head_dim)} or "
+            f"{(B, num_spatial_patches, 1, self.head_dim)}, got {k.shape}"
+        )
+        assert (
+            v.shape == (B, num_spatial_patches, self.num_heads, self.head_dim) or
+            v.shape == (B, num_spatial_patches, 1, self.head_dim)
+        ), (
+            f"v must have shape of {(B, num_spatial_patches, self.num_heads, self.head_dim)} or "
+            f"{(B, num_spatial_patches, 1, self.head_dim)}, got {v.shape}"
         )
 
         return q, k, v

@@ -1,5 +1,7 @@
 from configs.setup_env import device, dtype
 
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,13 +12,13 @@ class PatchEmbeddings2D(nn.Module):
     """Patch Embeddings using Conv2d for Vision Transformers.
 
     Args:
-        patch_size (int): Height and width of each patch (assumed square).
+        patch_size (int): Image patches in H, W pixels.
         target_size (int): Final square size after resize + center crop.
         C_in (int): Number of input channels.
         d_model (int): Dimension of output embeddings.
     """
     def __init__(
-        self, 
+        self,
         patch_size: int,
         target_size: int,
         C_in: int, 
@@ -71,7 +73,7 @@ class PatchEmbeddings2D(nn.Module):
                 size=(new_H, new_W), 
                 mode="bilinear", 
                 align_corners=False
-            )
+            ) # [B, C, new_H, new_W]
 
             # Center crop to final square size
             x = TF.center_crop(x, output_size=(self.target_size, self.target_size))
@@ -98,7 +100,7 @@ def test_2d_patch_embed():
     patch_embeddings = PatchEmbeddings2D(
         patch_size, target_size, C, d_model
     ).to(device)
-    B, H, W = 1, 224, 224
+    B, H, W = 1, 224, 384
     x = torch.randn(B, C, H, W).to(device)
     x_out = patch_embeddings(x)
     return x_out

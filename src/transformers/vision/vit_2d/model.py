@@ -1,5 +1,7 @@
 from configs.setup_env import device, dtype
 
+import math
+
 import torch
 import torch.nn as nn
 from torch.amp import autocast
@@ -9,7 +11,7 @@ from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
 from src.transformers.vision.vit_2d.optimized_attention import SpatialAttentionBlock
 from src.transformers.vision.vit_2d.patch_embeddings2d import PatchEmbeddings2D
-from configs.transformers.vision.vit_2d.model_args.model_args_medium import ModelArgs
+from configs.transformers.vision.vit_2d.model_args.model_args_xlarge import ModelArgs
 
 class SpatialTransformerBlock(nn.Module):
     """Transformer block stacking attn/ffn blocks.
@@ -116,13 +118,13 @@ class ImageEncoderTransformer(nn.Module):
                 d_model=model_args.d_model,
                 num_heads=model_args.num_heads,
                 query_groups=model_args.query_groups,
-                rope_theta=model_args.rope_theta,  # ADD TO MODEL ARGS
-                target_size=model_args.target_size,  # ADD TO MODEL ARGS
+                rope_theta=model_args.rope_theta,
+                target_size=model_args.target_size,
                 patch_size=model_args.patch_size,
-                softmax_scale=model_args.softmax_scale,  # ADD TO MODEL ARGS
-                use_windowed_attn=model_args.use_windowed_attn,  # ADD TO MODEL ARGS
-                use_proj_bias=model_args.use_proj_bias,  # ADD TO MODEL ARGS
-                use_fused_proj=model_args.use_fused_proj,  # ADD TO MODEL ARGS
+                softmax_scale=model_args.softmax_scale,
+                use_windowed_attn=model_args.use_windowed_attn,
+                use_proj_bias=model_args.use_proj_bias,
+                use_fused_proj=model_args.use_fused_proj,
                 eps=model_args.rms_norm_eps,
                 dropout=model_args.dropout,
                 d_ffn=model_args.d_ffn
@@ -135,10 +137,53 @@ class ImageEncoderTransformer(nn.Module):
 
         # Initialize weights
         self.apply(self._init_weights)
-
-
+        
     def _init_weights(self, module) -> None:
-        pass
+        """CLIP-style weight initialization.
+        
+        Args:
+            module: Module to be initialized.
+        """
+        std = self.model_args.d_model ** -0.5
+        
+        if isinstance(module, nn.Linear):
+            # Different initialization for different linear layers
+            module_name = getattr(module, '_name', '')
+            
+            if ('qkv_proj' in module_name or 
+                any(x in module_name for x in ['q_proj', 'k_proj', 'v_proj'])):
+                # qkv projections
+                nn.init.normal_(module.weight, std=std)
+            elif 'o_proj' in module_name:
+                # Output projections
+                nn.init.normal_(module.weight, std=std / math.sqrt(2 * self.model_args.num_layers))
+            elif 'weight3' in module_name:
+                # Third FFN layer 
+                nn.init.normal_(module.weight, std=std / math.sqrt(2 * self.model_args.num_layers))
+            elif 'weight1' in module_name or 'weight2' in module_name:
+                # First and second FFN layers
+                nn.init.normal_(module.weight, std=std)
+            else:
+                # Default for other linear layers
+                nn.init.normal_(module.weight, std=std)
+                
+            # Initialize biases to zero
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Conv2d):
+            # Patch embedding convolution
+            fan_out = module.kernel_size[0] * module.kernel_size[1] * module.out_channels
+            fan_out //= module.groups
+            nn.init.normal_(module.weight, std=math.sqrt(2.0 / fan_out))
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+                
+        elif isinstance(module, RMSNorm):
+            # Custom RMSNorm layers
+            nn.init.ones_(module.weight)
+        # Special handling for embedding layers
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, std=std)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass of image encoder.
@@ -177,3 +222,15 @@ class ImageEncoderTransformer(nn.Module):
         x = self.rms_norm(x)
 
         return x
+    
+def test_model_forward():
+    model_args = ModelArgs()
+    model = ImageEncoderTransformer(model_args).to(device)
+    B, C, H, W = 1, 3, 144, 72
+    x = torch.randn(B, C, H, W).to(device)
+    x_out = model(x)
+    return x_out
+
+if __name__ == "__main__":
+    x = test_model_forward()
+    print(x.shape)
