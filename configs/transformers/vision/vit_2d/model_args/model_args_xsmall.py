@@ -2,8 +2,10 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+from configs.transformers.vision.vit_2d.model_args.post_init import PostInitMixin
+
 @dataclass
-class ModelArgs:
+class ModelArgs(PostInitMixin):
     """Extra small configuration of model arguments, containing 89 million parameters."""
     target_size: int = 384
     patch_size: int = 16
@@ -30,3 +32,5 @@ class ModelArgs:
         if self.softmax_scale is None:
             self.softmax_scale = 1 / math.sqrt(self.d_model // self.num_heads)
             
+        # Call assertions
+        super().__init__()
