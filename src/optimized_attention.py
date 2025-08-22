@@ -335,7 +335,7 @@ class Attention(nn.Module):
                 head_dim=self.head_dim,
                 use_fused_proj=use_qkv_proj,
                 use_gqa=True,
-                use_proj_bias=False,
+                use_proj_bias=use_proj_bias,
                 query_groups=query_groups
             )
         else:
@@ -345,7 +345,7 @@ class Attention(nn.Module):
                 head_dim=self.head_dim,
                 use_fused_proj=use_qkv_proj,
                 use_gqa=True,
-                use_proj_bias=False,
+                use_proj_bias=use_proj_bias,
                 query_groups=query_groups
             )
 
@@ -475,17 +475,6 @@ class Attention(nn.Module):
                 v.shape == (B, T, self.query_groups, self.head_dim)
             ), f"v must have shape {(B, T, self.query_groups, self.head_dim)}, got {v.shape}"
 
-            # Handle KV cache
-            if use_cache and kv_cache is not None and layer_idx is not None:
-                # Get KV cache with the current sequence length
-                cached_k, cached_v = kv_cache.get(layer_idx, kv_cache.current_seq_len)
-                if cached_k is not None and cached_v is not None:
-                    # Concatenate cached and new KV
-                    k = torch.cat([cached_k, k], dim=1)
-                    v = torch.cat([cached_v, v], dim=1)
-                # Update cache using only the T most recent tokens
-                kv_cache.update(layer_idx, k[:, -T:], v[:, -T:])
-            
             # Extend KV tensors (if query_groups==1 and use_mqa=True, no expansion is done)
             k = extend_kv_heads(
                 input=k,
@@ -507,6 +496,17 @@ class Attention(nn.Module):
             assert (
                 v.size(2) == self.num_heads or k.size(2) == 1
             ), f"k.size(2) must be {self.num_heads} or 1, got {k.size(2)}"
+
+            # Handle KV cache
+            if use_cache and kv_cache is not None and layer_idx is not None:
+                # Get KV cache with the current sequence length
+                cached_k, cached_v = kv_cache.get(layer_idx, kv_cache.current_seq_len)
+                if cached_k is not None and cached_v is not None:
+                    # Concatenate cached and new KV
+                    k = torch.cat([cached_k, k], dim=1)
+                    v = torch.cat([cached_v, v], dim=1)
+                # Update cache using only the T most recent tokens
+                kv_cache.update(layer_idx, k[:, -T:], v[:, -T:])
 
             # for causal LM, we want right window to be 0
             if causal:
@@ -816,4 +816,37 @@ class AttentionBlock(nn.Module):
                 use_mqa=use_mqa
             )
             return x + self.dropout(attn_out), cache_out
-        
+
+def test_attention(use_pad: bool):
+    d_model, num_heads, query_groups, theta = 512, 32, 8, 10000.0
+    softmax_scale = 1 / (d_model // num_heads) ** 0.5
+    attention = Attention(d_model, num_heads, query_groups, theta, softmax_scale, False, True)
+    B, T = 4, 16
+    x = torch.randn(B, T, d_model).to(device)
+    padding_mask = None
+    if use_pad:
+        padding_mask = torch.randint(0, 2, (B, T), dtype=torch.bool).to(device)
+    kv_cache = KVCache(
+    max_batch_size=4,
+    max_seq_len=16,
+    num_heads=32,
+    head_dim=512 // 32,
+    num_layers=4
+)
+
+    x_out, _ = attention(
+        x,
+        left_window=-1,
+        right_window=-1,
+        causal=True,
+        padding_mask=padding_mask,
+        kv_cache=kv_cache,
+        layer_idx=2,
+        use_cache=True,
+        use_mqa=False
+    )
+    return x_out
+
+if __name__ == "__main__":
+    x_out = test_attention(True)
+    print(x_out.shape)
