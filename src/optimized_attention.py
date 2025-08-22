@@ -498,15 +498,14 @@ class Attention(nn.Module):
             ), f"k.size(2) must be {self.num_heads} or 1, got {k.size(2)}"
 
             # Handle KV cache
-            if use_cache and kv_cache is not None and layer_idx is not None:
-                # Get KV cache with the current sequence length
+            if use_cache and kv_cache.current_seq_len is not None and kv_cache.current_seq_len > 0:
                 cached_k, cached_v = kv_cache.get(layer_idx, kv_cache.current_seq_len)
-                if cached_k is not None and cached_v is not None:
-                    # Concatenate cached and new KV
-                    k = torch.cat([cached_k, k], dim=1)
-                    v = torch.cat([cached_v, v], dim=1)
-                # Update cache using only the T most recent tokens
-                kv_cache.update(layer_idx, k[:, -T:], v[:, -T:])
+                k = torch.cat([cached_k, k], dim=1)
+                v = torch.cat([cached_v, v], dim=1)
+
+            # Update KVCache and increment sequence length
+            kv_cache.update(layer_idx, k, v)
+            kv_cache.current_seq_len = k.size(1)
 
             # for causal LM, we want right window to be 0
             if causal:
@@ -656,20 +655,6 @@ class Attention(nn.Module):
                 assert (
                     q.shape == (B, self.num_heads, T, self.head_dim)
                 ), f"q must have shape {(B, self.num_heads, T, self.head_dim)}"
-                assert (
-                    k.shape == (B, self.num_heads, T, self.head_dim) or
-                    k.shape == (B, 1, T, self.head_dim)
-                ), (
-                    f"k must have shape {(B, self.num_heads, T, self.head_dim)} "
-                    f"or {(B, 1, T, self.head_dim)} got {k.shape}"
-                )
-                assert (
-                    v.shape == (B, self.num_heads, T, self.head_dim) or
-                    v.shape == (B, 1, T, self.head_dim)
-                ), (
-                    f"v must have shape {(B, self.num_heads, T, self.head_dim)}, "
-                    f"or {(B, 1, T, self.head_dim)} got {k.shape}"
-                )
 
                 # Apply padding mask for PyTorch SDPA
                 if padding_mask is not None:
@@ -832,7 +817,7 @@ def test_attention(use_pad: bool):
     num_heads=32,
     head_dim=512 // 32,
     num_layers=4
-)
+    )
 
     x_out, _ = attention(
         x,
@@ -848,5 +833,5 @@ def test_attention(use_pad: bool):
     return x_out
 
 if __name__ == "__main__":
-    x_out = test_attention(True)
-    print(x_out.shape)
+    x = test_attention(use_pad=True)
+    print(x.shape)
