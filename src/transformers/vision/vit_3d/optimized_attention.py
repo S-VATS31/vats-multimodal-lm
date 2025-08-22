@@ -7,7 +7,6 @@ from configs.setup_env import (
 )
 
 import math
-import warnings
 from typing import Tuple, Optional, Literal
 
 import torch
@@ -16,8 +15,8 @@ import torch.nn.functional as F
 from torch.amp import autocast
 
 from src.rms_norm import RMSNorm
+from utils.attention_utils import extend_kv_heads
 from src.transformers.vision.vit_3d.rope_3d import RoPE3D
-
 
 class SpatioTemporalAttention(nn.Module):
     """Factorized attention layer.
@@ -69,30 +68,6 @@ class SpatioTemporalAttention(nn.Module):
 
         # Initialize RoPE
         self.rope = RoPE3D(self.head_dim, rope_theta, patch_size)
-
-    def _extend_kv_heads(
-        self,
-        kv_tensor: torch.Tensor,
-        heads_per_group: int,
-        kv_heads_dim: int,
-        use_mqa: bool,
-    ) -> torch.Tensor:
-        """Extend kv heads to num_heads.
-        
-        Args:
-            kv_tensor (torch.Tensor): Input key or value tensor.
-            heads_per_group (int): Heads per group computed as num_heads // query_groups.
-            kv_heads_dim (int): Dimension to be repeated.
-            use_mqa (bool): Whether to use Multi-Query attention or not. Constraints: query_groups == 1.
-                It is strongly recommended to set use_mqa=False for video transformers unless you are
-                prioritizing speed/efficiency.
-
-        Returns:
-            torch.Tensor: K or V tensor with kv heads dimension repeated, now equal to num_heads.
-        """
-        if use_mqa and kv_tensor.size(kv_heads_dim) == 1:
-            return kv_tensor
-        return torch.repeat_interleave(kv_tensor, repeats=heads_per_group, dim=kv_heads_dim)
 
     def _optimized_attention(
         self,
@@ -208,7 +183,6 @@ class SpatioTemporalAttention(nn.Module):
 
         # Either import didn't work, or no cuda; fallback to gqa/flash attn, w/o swa
         else:
-            warnings.warn("Optimized attention not available, using PyTorch SDPA.")
             return self._grouped_query_attention(x, query, key, value, attn_mode, padding_mask)
 
     def _grouped_query_attention(
@@ -599,17 +573,17 @@ class SpatioTemporalAttention(nn.Module):
         q = self.rope(q, grid_shape, attn_mode)
         k = self.rope(k, grid_shape, attn_mode)
 
-        # Extend heads
-        k = self._extend_kv_heads(
-            kv_tensor=k,
-            heads_per_group=self.heads_per_group,
-            kv_heads_dim=2,
+        # Extend kv heads
+        k = extend_kv_heads(
+            input=k,
+            repeats=self.heads_per_group,
+            dim=2,
             use_mqa=use_mqa
         )
-        v = self._extend_kv_heads(
-            kv_tensor=v,
-            heads_per_group=self.heads_per_group,
-            kv_heads_dim=2,
+        v = extend_kv_heads(
+            input=v,
+            repeats=self.heads_per_group,
+            dim=2,
             use_mqa=use_mqa
         )
 

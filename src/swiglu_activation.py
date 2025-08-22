@@ -6,8 +6,6 @@ from configs.setup_env import (
     use_xformers_swiglu
 )
 
-import warnings
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -69,7 +67,6 @@ class SwiGLUActivation(nn.Module):
             ))
         
         else:
-            warnings.warn("xformers SwiGLU not available, falling back to PyTorch SwiGLU.")
             return self._pytorch_swiglu(x)
     
     def _pytorch_swiglu(self, x: torch.Tensor) -> torch.Tensor:
