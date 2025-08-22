@@ -11,8 +11,7 @@ from torch.utils.checkpoint import checkpoint
 from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
 from src.autoregressive_image_gen.text_encoder.encoder_attention import AttentionBlock
-from configs.diffusion.text_encoder.model_args.model_args_xlarge import ModelArgs
-        
+# TODO: set up and import model args
 
 class TransformerBlock(nn.Module):
     """  
