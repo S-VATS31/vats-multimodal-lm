@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch.amp import autocast
 
 from src.rms_norm import RMSNorm
-from utils.attention_utils import extend_kv_heads
+from utils.attention_utils import extend_kv_heads, setup_projections
 from src.transformers.vision.vit_3d.rope_3d import RoPE3D
 
 class SpatioTemporalAttention(nn.Module):
@@ -52,18 +52,15 @@ class SpatioTemporalAttention(nn.Module):
         self.head_dim = d_model // num_heads
         self.heads_per_group = num_heads // query_groups
 
-        # QKV projection matrix
-        self.w_qkv = nn.Linear(
-            d_model,
-            num_heads * self.head_dim + 2 * query_groups * self.head_dim,
-            bias=False, # decrease parameter count
-        )
-
-        # O projection matrix
-        self.w_o = nn.Linear(
-            d_model,
-            d_model,
-            bias=False,
+        # Get qkv and output projections
+        self.w_qkv, self.w_o = setup_projections(
+            d_model=d_model,
+            num_heads=num_heads,
+            head_dim=self.head_dim,
+            use_fused_proj=True,
+            use_gqa=True,
+            use_proj_bias=False,
+            query_groups=query_groups
         )
 
         # Initialize RoPE
@@ -757,5 +754,5 @@ def test_attention_block(use_pad: bool):
     return x_out
 
 if __name__ == "__main__":
-    x = test_attention_block(use_pad=True) # [B, 10//2, 144//12 * 144//12, d_model]
+    x = test_attention_block(use_pad=True) # [B, 10//2, 144//32 * 144//32, d_model]
     print(x.shape)
