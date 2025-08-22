@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.rms_norm import RMSNorm
-from utils.attention_utils import extend_kv_heads
+from utils.attention_utils import extend_kv_heads, setup_projections
 
 class RoPE(nn.Module):
     """Rotary positional embeddings (RoPE) to be applied to the query and key vectors.
@@ -327,26 +327,27 @@ class Attention(nn.Module):
                 f"num_heads ({num_heads}) must be divisible by query_groups ({query_groups})"
                 )
 
-        # QKV projection matrix
+        # Set up projections
         if use_qkv_proj:
-            self.w_qkv = nn.Linear(
-                d_model,
-                num_heads * self.head_dim + 2 * query_groups * self.head_dim,
-                bias=use_proj_bias,
-                dtype=dtype
-            ).to(device)
+            self.w_qkv, self.w_o = setup_projections(
+                d_model=d_model,
+                num_heads=num_heads,
+                head_dim=self.head_dim,
+                use_fused_proj=use_qkv_proj,
+                use_gqa=True,
+                use_proj_bias=False,
+                query_groups=query_groups
+            )
         else:
-            self.w_q = nn.Linear(d_model, num_heads * self.head_dim, dtype=dtype, bias=use_proj_bias)
-            self.w_k = nn.Linear(d_model, self.query_groups * self.head_dim, dtype=dtype, bias=use_proj_bias)
-            self.w_v = nn.Linear(d_model, self.query_groups * self.head_dim, dtype=dtype, bias=use_proj_bias)
-
-        # O projection matrix
-        self.w_o = nn.Linear(
-            d_model,
-            d_model,
-            bias=use_proj_bias,
-            dtype=dtype
-        ).to(device)
+            self.w_q, self.w_k, self.w_v, self.w_o = setup_projections(
+                d_model=d_model,
+                num_heads=num_heads,
+                head_dim=self.head_dim,
+                use_fused_proj=use_qkv_proj,
+                use_gqa=True,
+                use_proj_bias=False,
+                query_groups=query_groups
+            )
 
         self.rope = RoPE(self.head_dim, theta)
 
