@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch.amp import autocast
 
 from src.rms_norm import RMSNorm
-from utils.attention_utils import extend_kv_heads
+from utils.attention_utils import extend_kv_heads, setup_projections
 
 class RoPE(nn.Module):
     """Apply 2D rotary positional embeddings to query, key vectors.
@@ -244,35 +244,27 @@ class SpatialAttention(nn.Module):
         self.use_windowed_attn = use_windowed_attn
         self.use_fused_proj = use_fused_proj
 
-        # Fused projection
+        # Set up projections
         if use_fused_proj:
-            self.qkv_proj = nn.Linear(
-                d_model,
-                num_heads * self.head_dim + 2 * query_groups * self.head_dim,
-                bias=use_proj_bias
+            self.qkv_proj, self.o_proj = setup_projections(
+                d_model=d_model,
+                num_heads=num_heads,
+                head_dim=self.head_dim,
+                use_fused_proj=use_fused_proj,
+                use_gqa=True,
+                use_proj_bias=use_proj_bias,
+                query_groups=query_groups
             )
         else:
-            self.q_proj = nn.Linear(
-                d_model,
-                num_heads * self.head_dim,
-                bias=use_proj_bias
+            self.q_proj, self.k_proj, self.v_proj, self.o_proj = setup_projections(
+                d_model=d_model,
+                num_heads=num_heads,
+                head_dim=self.head_dim,
+                use_fused_proj=use_fused_proj,
+                use_gqa=True,
+                use_proj_bias=use_proj_bias,
+                query_groups=query_groups
             )
-            self.k_proj = nn.Linear(
-                d_model,
-                query_groups * self.head_dim,
-                bias=use_proj_bias
-            )
-            self.v_proj = nn.Linear(
-                d_model,
-                query_groups * self.head_dim,
-                bias=use_proj_bias
-            )
-        # Output projection
-        self.o_proj = nn.Linear(
-            d_model,
-            d_model,
-            bias=use_proj_bias
-        )
 
         self.rope = RoPE(
             head_dim=self.head_dim,

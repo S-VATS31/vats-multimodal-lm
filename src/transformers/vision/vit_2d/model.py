@@ -11,7 +11,7 @@ from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
 from src.transformers.vision.vit_2d.optimized_attention import SpatialAttentionBlock
 from src.transformers.vision.vit_2d.patch_embeddings2d import PatchEmbeddings2D
-from configs.transformers.vision.vit_2d.model_args.model_args_xlarge import ModelArgs
+from configs.transformers.vision.vit_2d.model_args.model_args_medium import ModelArgs
 
 class SpatialTransformerBlock(nn.Module):
     """Transformer block stacking attn/ffn blocks.
