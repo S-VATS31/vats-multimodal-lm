@@ -6,7 +6,6 @@ from configs.setup_env import (
     flash_attn_varlen_qkvpacked_func
 )
 
-import warnings
 from typing import Tuple, Optional, Dict
 
 import torch
@@ -14,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.rms_norm import RMSNorm
+from utils.attention_utils import extend_kv_heads
 
 class RoPE(nn.Module):
     """Rotary positional embeddings (RoPE) to be applied to the query and key vectors.
@@ -350,34 +350,6 @@ class Attention(nn.Module):
 
         self.rope = RoPE(self.head_dim, theta)
 
-    def _extend_kv_heads(
-        self,
-        kv_tensor: torch.Tensor, 
-        heads_per_group: int, 
-        kv_heads_dim: int,
-        use_mqa: bool = False,
-    ):
-        """Extend kv heads to query heads (num_heads).
-        
-        Args:
-            input_tensor (torch.Tensor): Key or value tensor to be repeated.
-            heads_per_group (int): Heads per group computed as num_heads // query_groups.
-            dim_to_repeat (int): Dimension to of the input tensor to be repeated.
-            use_mqa (bool): Whether to Multi-Query attention instead of GQA.
-                Constraints: query_groups == 1.
-
-        Returns:
-            torch.Tensor: Key or value tensor with specific dimension extended.
-        """
-        if use_mqa and kv_tensor.size(kv_heads_dim) == 1:
-            warnings.warn(
-                "Using multi-query attention, consider switching to GQA for more expressiveness"
-            )
-            # For MQA, we return tensor as is
-            return kv_tensor
-        # For GQA, we expand kv heads and then return tensor
-        return torch.repeat_interleave(kv_tensor, heads_per_group, dim=kv_heads_dim)
-
     def forward(
         self,
         x: torch.Tensor,
@@ -471,9 +443,6 @@ class Attention(nn.Module):
                     v.shape == (B, T, self.query_groups * self.head_dim)
                 ), f"v must have shape {(B, T, self.query_groups * self.head_dim)}, got {v.shape}"
             else:
-                warnings.warn(
-                    "Using seperate projections, set use_qkv_proj=True to use single qkv projection."
-                )
                 q, k, v = self.w_q(x), self.w_k(x), self.w_v(x)
 
                 assert (
@@ -517,16 +486,16 @@ class Attention(nn.Module):
                 kv_cache.update(layer_idx, k[:, -T:], v[:, -T:])
             
             # Extend KV tensors (if query_groups==1 and use_mqa=True, no expansion is done)
-            k = self._extend_kv_heads(
-                kv_tensor=k,
-                heads_per_group=self.heads_per_group, 
-                kv_heads_dim=2, 
+            k = extend_kv_heads(
+                input=k,
+                repeats=self.heads_per_group,
+                dim=2,
                 use_mqa=use_mqa
             )
-            v = self._extend_kv_heads(
-                kv_tensor=v, 
-                heads_per_group=self.heads_per_group, 
-                kv_heads_dim=2, 
+            v = extend_kv_heads(
+                input=v,
+                repeats=self.heads_per_group,
+                dim=2,
                 use_mqa=use_mqa
             )
 
@@ -678,9 +647,6 @@ class Attention(nn.Module):
 
             # Fallback to PyTorch SPDA if no cuda
             else:
-                warnings.warn(
-                    "Flash Attention 2/SWA not available, falling back to PyTorch SDPA."
-                    )
                 # Reshape q, k, v to [B, num_heads, T, head_dim] (assuming kv_heads get extended)
                 q = q.transpose(1, 2)
                 k = k.transpose(1, 2)
