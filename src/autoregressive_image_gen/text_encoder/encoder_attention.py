@@ -16,6 +16,7 @@ from torch.amp import autocast
 from src.optimized_attention import RoPE
 from src.rms_norm import RMSNorm
 
+from utils.attention_utils import extend_kv_heads, setup_projections
 
 class Attention(nn.Module):
     """Attention module for encoder.
@@ -58,69 +59,29 @@ class Attention(nn.Module):
         self.head_dim = d_model // num_heads
         self.heads_per_group = num_heads // query_groups
 
-        # qkv projection
+        # Set up projections
         if use_qkv_proj:
-            self.qkv_proj = nn.Linear(
-                d_model,
-                num_heads * self.head_dim + 2 * query_groups * self.head_dim,
-                bias=use_proj_bias,
-                dtype=dtype
+            self.qkv_proj, self.o_proj = setup_projections(
+                d_model=d_model,
+                num_heads=num_heads,
+                head_dim=self.head_dim,
+                use_fused_proj=use_qkv_proj,
+                use_gqa=True,
+                use_proj_bias=use_proj_bias,
+                query_groups=self.query_groups
             )
         else:
-            # query projection
-            self.q_proj = nn.Linear(
-                d_model,
-                num_heads * self.head_dim,
-                bias=use_proj_bias,
-                dtype=dtype,
+            self.q_proj, self.k_proj, self.v_proj, self.o_proj = setup_projections(
+                d_model=d_model,
+                num_heads=num_heads,
+                head_dim=self.head_dim,
+                use_fused_proj=use_qkv_proj,
+                use_gqa=True,
+                use_proj_bias=use_proj_bias,
+                query_groups=self.query_groups
             )
-            # key projection
-            self.k_proj = nn.Linear(
-                d_model,
-                query_groups * self.head_dim,
-                bias=use_proj_bias,
-                dtype=dtype
-            )
-            # value projection
-            self.v_proj = nn.Linear(
-                d_model,
-                query_groups * self.head_dim,
-                bias=use_proj_bias,
-                dtype=dtype
-            )
-
-        # output projection
-        self.o_proj = nn.Linear(
-            d_model,
-            d_model,
-            bias=use_proj_bias,
-            dtype=dtype,
-        )
 
         self.rope = RoPE(self.head_dim, theta)
-
-    def _extend_kv_heads(
-        self,
-        input: torch.Tensor,
-        heads_per_group: int,
-        dim: int,
-        enable_mqa: bool
-    ) -> torch.Tensor:
-        """Extend key value heads to num_heads (query heads) for GQA.
-        
-        Args:
-            input (torch.Tensor): Input key or value tensor.
-            heads_per_groups (int): Heads per group computed as num_heads // query_groups.
-            dim (int): Dimension to be repeated.
-            enable_mqa (bool): Whether to use MQA or not. 
-                Contrainsts for MQA: input.size(dim) must be 1 for MQA and enable_mqa must be True.
-
-        Returns:
-            torch.Tensor: Tensor with key or value head repeated to num_heads
-        """
-        if input.size(dim) == 1 and enable_mqa:
-            return input
-        return input.repeat_interleave(repeats=heads_per_group, dim=dim)
 
     def _optimized_attention(
         self,
@@ -160,15 +121,12 @@ class Attention(nn.Module):
             - value.device must be cuda.
         """
         if (
-            use_flash_attn
-            and flash_attn_varlen_qkvpacked_func is not None
-            and device.type == "cuda"
+            flash_attn_varlen_qkvpacked_func is not None
+            and use_flash_attn and device.type == "cuda"
             and query.dtype in gpu_dtypes
             and key.dtype in gpu_dtypes
             and value.dtype in gpu_dtypes
-            and query.is_cuda
-            and key.is_cuda
-            and value.is_cuda
+            and query.is_cuda and key.is_cuda and value.is_cuda
         ):
             if padding_mask is not None:
                 # Stack qkv along 3rd dim
@@ -460,17 +418,17 @@ class Attention(nn.Module):
         ), f"v must have shape of {(B, T, self.query_groups, self.head_dim)}, got {v.shape}"
 
         # Extend KV heads for GQA
-        k = self._extend_kv_heads(
+        k = extend_kv_heads(
             input=k,
-            heads_per_group=self.heads_per_group,
+            repeats=self.heads_per_group,
             dim=2,
-            enable_mqa=enable_mqa
+            use_mqa=enable_mqa
         )
-        v = self._extend_kv_heads(
+        v = extend_kv_heads(
             input=v,
-            heads_per_group=self.heads_per_group,
+            repeats=self.heads_per_group,
             dim=2,
-            enable_mqa=enable_mqa
+            use_mqa=enable_mqa
         )
 
         assert (
