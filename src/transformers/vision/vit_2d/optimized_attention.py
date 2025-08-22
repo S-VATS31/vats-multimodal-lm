@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch.amp import autocast
 
 from src.rms_norm import RMSNorm
-
+from utils.attention_utils import extend_kv_heads
 
 class RoPE(nn.Module):
     """Apply 2D rotary positional embeddings to query, key vectors.
@@ -280,28 +280,6 @@ class SpatialAttention(nn.Module):
             patch_size=patch_size,
             rope_theta=rope_theta
         )
-
-    def _extend_kv_heads(
-        self,
-        input: torch.Tensor,
-        repeats: int,
-        dim: int,
-        use_mqa: bool
-    ) -> torch.Tensor:
-        """Repeat KV heads for specific number of times.
-        
-        Args:
-            input (torch.Tensor): Input key or value tensor.
-            repeats (int): Number of repeats for specific dimension.
-            dim (int): Dimension to be repeated (query_groups dim).
-            use_mqa (bool): Whether to use MQA or not.
-
-        Returns:
-            torch.Tensor: Output tensor with specific dimension repeated.
-        """
-        if use_mqa and input.size(dim) == 1:
-            return input
-        return input.repeat_interleave(repeats=repeats, dim=dim)
 
     def _optimized_attention(
         self,
@@ -571,13 +549,13 @@ class SpatialAttention(nn.Module):
         ), f"q must have shape of {(B, num_spatial_patches, self.query_groups, self.head_dim)}, got {q.shape}"
 
         # Extend kv heads
-        k = self._extend_kv_heads(
+        k = extend_kv_heads(
             input=k,
             repeats=self.heads_per_group,
             dim=2,
             use_mqa=use_mqa
         )
-        v = self._extend_kv_heads(
+        v = extend_kv_heads(
             input=v,
             repeats=self.heads_per_group,
             dim=2,

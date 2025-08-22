@@ -6,6 +6,8 @@ from configs.setup_env import (
     flash_attn_varlen_qkvpacked_func
 )
 
+# TODO: Implement optimized attention using flash attention.
+
 from typing import Tuple
 
 import torch
