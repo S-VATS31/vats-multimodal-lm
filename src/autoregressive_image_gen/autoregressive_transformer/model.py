@@ -171,7 +171,9 @@ def test_transformer_block():
     T_k = 16
     x = torch.randn(B, T_q, d_model).to(device)
     text_embeddings = torch.randn(B, T_k, d_model).to(device)
-    padding_mask = torch.randint(0, 2, (B, T_q), dtype=torch.bool).to(device)
+    padding_mask = torch.randint(
+        0, 2, (B, T_q), dtype=torch.bool
+    ).to(device)
     x_out = block(
         x,
         text_embeddings,
