@@ -267,7 +267,7 @@ class CausalSelfAttention(nn.Module):
 
                 assert torch.all(
                     causal_mask.float().triu(1) == 0
-                ), f"Causal masking failed, \n{causal_mask.float().triu(1)}"
+                ), f"Causal masking failed, all should have been zeros: \n{causal_mask.float().triu(1)}"
 
                 assert (
                     causal_mask.shape == (query.size(2), key.size(2))
