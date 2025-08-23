@@ -18,8 +18,6 @@ from src.rms_norm import RMSNorm
 
 from utils.attention_utils import extend_kv_heads, setup_projections
 
-# TODO: change B, T in attention to use query.size(dim)
-
 class Attention(nn.Module):
     """Attention module for encoder.
 
