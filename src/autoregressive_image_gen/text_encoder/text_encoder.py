@@ -11,7 +11,7 @@ from torch.utils.checkpoint import checkpoint
 from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
 from src.autoregressive_image_gen.text_encoder.encoder_attention import AttentionBlock
-# TODO: set up and import model args
+from configs.autoregressive_image_gen.text_encoder.model_args.model_args_large import ModelArgs
 
 class TransformerBlock(nn.Module):
     """  
@@ -85,7 +85,7 @@ class TransformerBlock(nn.Module):
         """
         with autocast(device_type=device.type, dtype=dtype):
             return self.ffn_block(self.attention_block(
-                x=x,
+                x,
                 left_window=left_window,
                 right_window=right_window,
                 enable_mqa=enable_mqa,
@@ -173,6 +173,7 @@ class TransformerTextEncoder(nn.Module):
 
             # Apply embeddings
             x = self.dropout(self.token_embedding(input_ids)) # [B, T, d_model]
+            
             assert (
                 x.dim() == 3
             ), f"x must be of shape [B, T, d_model], got {x.dim()} dimensions."
