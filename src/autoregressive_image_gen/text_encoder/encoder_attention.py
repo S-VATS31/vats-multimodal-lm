@@ -566,14 +566,14 @@ class AttentionBlock(nn.Module):
             torch.Tensor: Output tensor of same shape as input.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return x + self.dropout(self.rms_norm(self.attention(
-                x=x,
+            return x + self.dropout(self.attention(
+                self.rms_norm(x),
                 left_window=left_window,
                 right_window=right_window,
                 enable_mqa=enable_mqa,
                 padding_mask=padding_mask,
                 use_diffusion=use_diffusion,
-            )))
+            ))
     
 def main():
     d_model, num_heads, query_groups, theta = 512, 32, 1, 10000.0

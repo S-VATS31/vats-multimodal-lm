@@ -790,7 +790,7 @@ class AttentionBlock(nn.Module):
         """
         with torch.amp.autocast(device_type=device.type, dtype=dtype):
             attn_out, cache_out = self.attn(
-                x=self.rms_norm(x),
+                self.rms_norm(x),
                 left_window=left_window,
                 right_window=right_window,
                 causal=causal,
@@ -819,7 +819,7 @@ def test_attention(use_pad: bool):
     num_layers=4
     )
 
-    x_out, _ = attention(
+    x_out, cache_out = attention(
         x,
         left_window=-1,
         right_window=-1,
@@ -830,8 +830,8 @@ def test_attention(use_pad: bool):
         use_cache=True,
         use_mqa=False
     )
-    return x_out
+    return x_out, cache_out
 
 if __name__ == "__main__":
-    x = test_attention(use_pad=True)
+    x, _ = test_attention(use_pad=True)
     print(x.shape)

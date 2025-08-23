@@ -674,14 +674,14 @@ class SpatialAttentionBlock(nn.Module):
             torch.Tensor: Output tensor of same shape as input.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return x + self.dropout(self.rms_norm(
+            return x + self.dropout(
                 self.attention(
-                    x=x,
+                    self.rms_norm(x),
                     use_mqa=use_mqa,
                     left_window=left_window,
                     right_window=right_window
                 )
-            ))
+            )
 
 def test_attention_block():
     d_model, num_heads, query_groups = 512, 32, 8
