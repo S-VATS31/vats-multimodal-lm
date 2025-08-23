@@ -15,6 +15,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import autocast
 
+from src.rms_norm import RMSNorm
+
 class CrossAttention(nn.Module):
     """Cross attention layer acting as a bridge between input embddings and image to be generated.
     
@@ -194,11 +196,65 @@ class CrossAttention(nn.Module):
             cross_attn_out = self._cross_attention(x, text_embeddings) # [B, H*W, d_model]
             # Output projection, same shape
             return self.o_proj(cross_attn_out)
+        
+class CrossAttentionBlock(nn.Module):
+    """Cross attention block with normalization, dropout, and residuals.
+    
+    Args:
+        d_model (int): Dimensionality of model embeddings.
+        num_heads (int): Number of attention heads.
+        softmax_scale (float): Value to scale attention scores by.
+        use_proj_bias (bool): Whether to use projection bias or not.
+        eps (float): Epsilon value to ensure numerical stability in RMSNorm.
+        dropout (float): Dropout probability for regularization.
+    """
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        softmax_scale: float,
+        use_proj_bias: bool,
+        eps: float,
+        dropout: float,
+    ):
+        super().__init__()
+
+        self.cross_attention = CrossAttention(
+            d_model=d_model,
+            num_heads=num_heads,
+            softmax_scale=softmax_scale,
+            use_proj_bias=use_proj_bias
+        )
+        self.rms_norm = RMSNorm(d_model=d_model, eps=eps)
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        text_embeddings: torch.Tensor
+    ) -> torch.Tensor:
+        """Forward pass of cross attention block.
+        
+        Args:
+            x (torch.Tensor): Image tokens of shape [B, H*W, d_model].
+            text_embeddings (torch.Tensor): Text tokens of shape [B, T, d_model].
+
+        Returns:
+            torch.Tensor: Output tensor of shape [B, H*W, d_model].
+        """
+        with autocast(device_type=device.type, dtype=dtype):
+            return x + self.dropout(self.cross_attention(
+                self.rms_norm(x),
+                text_embeddings
+            ))
 
 def main():
     d_model, num_heads = 512, 32
+    eps, dropout = 1e-7, 0.15
     softmax_scale = 1 / (d_model // num_heads) ** 0.5
-    cross_attn = CrossAttention(d_model, num_heads, softmax_scale, use_proj_bias=False).to(device)
+    cross_attn = CrossAttentionBlock(
+        d_model, num_heads, softmax_scale, use_proj_bias=False, eps=eps, dropout=dropout
+    ).to(device)
     B, H, W = 1, 144, 144
     T_q = H*W
     T_k = 16
