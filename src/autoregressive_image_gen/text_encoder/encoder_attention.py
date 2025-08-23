@@ -18,6 +18,8 @@ from src.rms_norm import RMSNorm
 
 from utils.attention_utils import extend_kv_heads, setup_projections
 
+# TODO: change B, T in attention to use query.size(dim)
+
 class Attention(nn.Module):
     """Attention module for encoder.
 
@@ -88,8 +90,6 @@ class Attention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        B: int,
-        T: int,
         left_window: int,
         right_window: int,
         padding_mask: Optional[torch.Tensor] = None
@@ -110,7 +110,7 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor of shape [B, T, d_model].
             
         Requirements:
-            - use_flash_must be True.
+            - use_flash_attn must be True.
             - flash_attn_varlen_qkvpacked_func cannot be None.
             - device.type must be cuda.
             - query.dtype must be float16 or bfloat16.
@@ -120,6 +120,9 @@ class Attention(nn.Module):
             - key.device must be cuda.
             - value.device must be cuda.
         """
+        B, T, _, _ = query.shape
+
+        # Flash attention
         if (
             flash_attn_varlen_qkvpacked_func is not None
             and use_flash_attn and device.type == "cuda"
@@ -225,15 +228,13 @@ class Attention(nn.Module):
                     "padding_mask must be given for text encoder."
                 )
         else:
-            return self._torch_attention(query, key, value, B, T, padding_mask)
+            return self._torch_attention(query, key, value, padding_mask)
         
     def _torch_attention(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        B: int,
-        T: int,
         padding_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Fallback attention method utilizing PyTorch SDPA + GQA.
@@ -253,6 +254,9 @@ class Attention(nn.Module):
             We expect same input tensor shape as optimized attention, but we transpose dimensions 1 and 2 of the qkv tensors
             giving us a shape of [B, num_heads, T, head_dim] for all qkv tensors.
         """
+        # Get batch size and seqlen before transpose
+        B, T, _, _ = query.shape
+
         # Transpose to [B, num_heads, T, head_dim]
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
@@ -319,7 +323,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         enable_mqa: bool
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Set up query, key, and value vectors for attention.
 
         Args:
@@ -330,15 +334,27 @@ class Attention(nn.Module):
                 - torch.Tensor: Query tensor of shape [B, T, num_heads, head_dim]
                 - torch.Tensor: Key tensor of shape [B, T, num_heads, head_dim] or [B, T, 1, head_dim].
                 - torch.Tensor: Value tensor of shape [B, T, num_heads, head_dim] or [B, T, 1, head_dim].
-                - int: Batch size.
-                - int: Sequence length.
         """
         assert (
             x.dim() == 3
         ), f"x must have 3 dimensions, got {x.dim()}"
         B, T, _ = x.shape
+
+        # Handle empty input
         if T == 0:
-            return torch.empty(B, 0, self.d_model, dtype=x.dtype).to(x.device)
+            # Output q, k, v returns 1 or num_heads (dim 1) so handle both cases
+            if enable_mqa and self.query_groups == 1:
+                return (
+                    torch.empty(B, 0, self.num_heads, self.head_dim, dtype=dtype, device=device), # q
+                    torch.empty(B, 0, 1, self.head_dim, dtype=dtype, device=device), # k
+                    torch.empty(B, 0, 1, self.head_dim, dtype=dtype, device=device)  # v
+                )
+            else:
+                return (
+                    torch.empty(B, 0, self.num_heads, self.head_dim, dtype=dtype, device=device), # q
+                    torch.empty(B, 0, self.num_heads, self.head_dim, dtype=dtype, device=device), # k
+                    torch.empty(B, 0, self.num_heads, self.head_dim, dtype=dtype, device=device)  # v
+                )
 
         # Fused projection matrix
         if self.use_qkv_proj: 
@@ -446,7 +462,7 @@ class Attention(nn.Module):
             f" {(B, T, 1, self.head_dim)}, got {v.shape}"
         )
 
-        return q, k, v, B, T
+        return q, k, v
 
     def forward(
         self,
@@ -481,14 +497,14 @@ class Attention(nn.Module):
                     - torch.Tensor: Value tensor.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            q, k, v, B, T = self._setup_qkv(x, enable_mqa)
+            q, k, v = self._setup_qkv(x, enable_mqa)
             # Global attention for diffusion (image-gen)
             if use_diffusion:
                 left_window, right_window = -1, -1
 
             # Get attention output
             attn_out = self._optimized_attention(
-                query=q, key=k, value=v, B=B, T=T,
+                query=q, key=k, value=v,
                 left_window=left_window,
                 right_window=right_window,
                 padding_mask=padding_mask
