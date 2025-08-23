@@ -688,15 +688,15 @@ class SpatioTemporalAttentionBlock(nn.Module):
             torch.Tensor: Output tensor with same shape as input.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return x + self.dropout(self.rms_norm(
-                self.attention.forward(
-                    x=x,
+            return x + self.dropout(
+                self.attention(
+                    self.rms_norm(x),
                     grid_size=grid_size,
                     use_mqa=use_mqa,
                     window_size=window_size,
                     padding_mask=padding_mask
                 )
-            ))
+            )
 
 def test_attention(use_pad: bool):
     d_model, num_heads, query_groups, rope_theta = 744, 124, 2, 10000.0
