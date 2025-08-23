@@ -8,7 +8,7 @@ from configs.setup_env import (
 
 # TODO: Implement optimized attention using flash attention.
 
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
 import torch.nn as nn
@@ -51,11 +51,45 @@ class CrossAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, d_model, bias=use_proj_bias)
         self.o_proj = nn.Linear(d_model, d_model, bias=use_proj_bias)
 
+    def _optimized_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        padding_mask: torch.Tensor = None
+    ) -> torch.Tensor:
+        """Optimized attention mechanism leveraging flash attention.
+        
+        Args:
+            query (torch.Tensor): Query tensor of shape [B, T, num_heads, head_dim].
+            key (torch.Tensor): Key tensor of shape [B, T, num_heads, head_dim].
+            value (torch.Tesnor): Value tensor of shape [B, T, num_heads, head_dim].
+            padding_mask (torch.Tensor): Padding tensor of shape [B, T_k].
+
+        Returns:
+            torch.Tensor: Output tensor of shape [B, T, d_model].
+        """
+        if (
+            flash_attn_varlen_qkvpacked_func is not None
+            and use_flash_attn and device.type == "cuda"
+            and query.dtype in gpu_dtypes
+            and key.dtype in gpu_dtypes
+            and value.dtype in gpu_dtypes
+            and query.is_cuda and key.is_cuda and value.is_cuda
+        ):
+            if padding_mask is not None:
+                pass
+            else:
+                raise ValueError("must using padding mask")
+        else:
+            return self._torch_attention(query, key, value, padding_mask)
+
     def _torch_attention(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Fallback cross attention leveraging PyTorch scaled dot product attention.
         
@@ -65,6 +99,7 @@ class CrossAttention(nn.Module):
             key (torch.Tensor): Key tensor of shape [B, T_k, num_heads, head_dim].
             value (torch.Tensor): Value tensor of shape [B, T_k, num_heads, head_dim].
                 K, V tensors represent text embeddings -> giving info to image to be generated (Q).
+            padding_mask: Optional[torch.Tensor]: Padding mask of shape [B, T_k].
 
         Returns:
             torch.Tensor: Attention output of shape [B, H*W, d_model].
@@ -76,16 +111,38 @@ class CrossAttention(nn.Module):
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
+        # Set up padding mask
+        if padding_mask is not None:
+            padding_mask = padding_mask.bool()
+            assert (
+                padding_mask.shape == (query.size(0), key.size(2))
+            ), f"expected {query.size(0), key.size(2)}, got {padding_mask.shape}"
+            attn_mask = padding_mask[:, None, None, :] # [B, 1, 1, T]
+        else:
+            attn_mask = None
+
+        if attn_mask is not None:
+            assert (
+                attn_mask.shape == (query.size(0), 1, 1, key.size(2))
+            ), f"expected: {(query.size(0), 1, 1, key.size(2))}, got {attn_mask.shape}"
+            assert (
+                attn_mask.dtype == torch.bool
+            ), f"expected torch.bool, got {attn_mask.dtype}"
+
         # Scaled dot product attention
         attn_out = F.scaled_dot_product_attention(
-            query=query, 
+            query=query,
             key=key, 
             value=value,
+            attn_mask=attn_mask,
             is_causal=False,
             scale=self.softmax_scale,
             enable_gqa=False,
-            
         ) # [B, num_heads, T_q, head_dim]
+
+        assert (
+            attn_out.shape == (query.size(0), self.num_heads, query.size(2), self.head_dim)
+        ), f"expected {(query.size(0), self.num_heads, query.size(2), self.head_dim)}, got {attn_out.shape}"
 
         # Reshape to 3D output
         attn_out = (
@@ -94,6 +151,10 @@ class CrossAttention(nn.Module):
             .contiguous()
             .view(query.size(0), query.size(2), -1)
         )
+
+        assert (
+            attn_out.shape == (query.size(0), query.size(2), self.d_model)
+        ), f"expected {(query.size(0), query.size(2), self.d_model)}, got {attn_out.shape}"
 
         return attn_out
 
@@ -155,26 +216,27 @@ class CrossAttention(nn.Module):
             v.shape == (B, T_k, self.num_heads, self.head_dim)
         ), f"v must have shape of {(B, T_k, self.num_heads, self.head_dim)}, got {v.shape}"
 
-
         return q, k, v
 
     def _cross_attention(
         self,
         x: torch.Tensor,
         text_embeddings: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Apply cross attention.
         
         Args:
             x (torch.Tensor): Image tokens of shape [B, H*W, d_model].
             text_embeddings (torch.Tensor): Text tokens of shape [B, T, d_model].
+            padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
 
         Returns:
             torch.Tensor: Output of cross attention layer, shape: [B, H*W, d_model].
         """
         q, k, v = self._setup_qkv(x, text_embeddings)
         # Get cross attention output
-        cross_attn_out = self._torch_attention(q, k, v)
+        cross_attn_out = self._optimized_attention(q, k, v, padding_mask)
         
         return cross_attn_out
 
@@ -182,20 +244,26 @@ class CrossAttention(nn.Module):
         self,
         x: torch.Tensor,
         text_embeddings: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Apply cross attention.
         
         Args:
             x (torch.Tensor): Image tokens of shape [B, H*W, d_model].
             text_embeddings (torch.Tensor): Text tokens of shape [B, T, d_model].
+            padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
 
         Returns:
             torch.Tensor: Output of cross attention layer, shape: [B, H*W, d_model].
         """
         with autocast(device_type=device.type, dtype=dtype):
-            cross_attn_out = self._cross_attention(x, text_embeddings) # [B, H*W, d_model]
-            # Output projection, same shape
-            return self.o_proj(cross_attn_out)
+            cross_attn_out = self._cross_attention(
+                x, 
+                text_embeddings=text_embeddings,
+                padding_mask=padding_mask
+            ) # [B, H*W, d_model]
+            
+            return self.o_proj(cross_attn_out) # [B, H*W, d_model]
         
 class CrossAttentionBlock(nn.Module):
     """Cross attention block with normalization, dropout, and residuals.
@@ -231,13 +299,15 @@ class CrossAttentionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        text_embeddings: torch.Tensor
+        text_embeddings: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Forward pass of cross attention block.
         
         Args:
             x (torch.Tensor): Image tokens of shape [B, H*W, d_model].
             text_embeddings (torch.Tensor): Text tokens of shape [B, T, d_model].
+            padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
 
         Returns:
             torch.Tensor: Output tensor of shape [B, H*W, d_model].
@@ -245,27 +315,30 @@ class CrossAttentionBlock(nn.Module):
         with autocast(device_type=device.type, dtype=dtype):
             return x + self.dropout(self.cross_attention(
                 self.rms_norm(x),
-                text_embeddings
+                text_embeddings=text_embeddings,
+                padding_mask=padding_mask
             ))
 
-def main():
+def main(use_pad: bool):
     d_model, num_heads = 512, 32
     eps, dropout = 1e-7, 0.15
     softmax_scale = 1 / (d_model // num_heads) ** 0.5
     cross_attn = CrossAttentionBlock(
         d_model, num_heads, softmax_scale, use_proj_bias=False, eps=eps, dropout=dropout
     ).to(device)
-    B, H, W = 1, 144, 144
+    B, H, W = 1, 72, 144
     T_q = H*W
     T_k = 16
     x_image = torch.randn(B, T_q, d_model).to(device)
     x_text = torch.randn(B, T_k, d_model).to(device)
-    x_out = cross_attn(x_image, x_text)
-    return x_out
+    if use_pad:
+        print("USING PADDING.")
+        padding_mask = torch.randint(0, 2, (B, T_k), dtype=torch.bool).to(device)
+        return cross_attn(x_image, x_text, padding_mask)
+    print("NOT USING PADDING")
+    return cross_attn(x_image, x_text)
 
 if __name__ == "__main__":
-    x = main()
-    # [B, T_q, d_model], where T_q = H*W
-    # H, W = 144, 144 -> H*W = 20736
+    x = main(use_pad=True)
+    # [B, H*W, d_model] -> [1, 72*144, 512]
     print(x.shape)
-    
