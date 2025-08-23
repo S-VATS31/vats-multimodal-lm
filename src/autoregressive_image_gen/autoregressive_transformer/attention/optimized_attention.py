@@ -107,6 +107,7 @@ class CausalSelfAttention(nn.Module):
 
     def _optimized_attention(
         self,
+        x: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
@@ -115,6 +116,24 @@ class CausalSelfAttention(nn.Module):
         right_window: int,
         padding_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        """Optimized attention utilizing flash attn V2 and sliding window attn (SWA).
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, T, d_model]. Only using for shape validation.
+            query (torch.Tensor): Query tensor of shape [B, T, num_heads, head_dim].
+            key (torch.Tensor): Key tensor of shape [B, T, num_heads, head_dim].
+            value (torch.Tensor): Value tensor of shape [B, T, num_heads, head_dim].
+            causal (bool): Whether to use causal masking or not.
+            left_window (int): Left window for SWA.
+            right_window (int): Right window for SWA.
+            padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
+
+        Returns:
+            torch.Tensor: Output tensor of shape [B, T, d_model].
+        """
+        B, T, _ = x.shape
+
+        # Flash Attention
         if (
             flash_attn_varlen_qkvpacked_func is not None
             and use_flash_attn and device.type == "cuda"
@@ -123,7 +142,76 @@ class CausalSelfAttention(nn.Module):
             and value.dtype in gpu_dtypes
             and query.is_cuda and key.is_cuda and value.is_cuda
         ):
-            pass
+            if causal and padding_mask is not None:
+                # Stack qkv over dim3
+                qkv_stacked = torch.stack(
+                    [query, key, value], dim=3
+                ).contiguous() # [B, T, num_heads, 3, head_dim]
+
+                assert (
+                    qkv_stacked.shape == (B, T, self.num_heads, 3, self.head_dim)
+                ), f"expected: {(B, T, self.num_heads, 3, self.head_dim)}, got {qkv_stacked.shape}"
+
+                # Get cumulative sequence lengths
+                # get number of valid tokens per seq
+                # do cumsum to get end idx of each seq
+                seqlens = padding_mask.sum(dim=1).to(torch.int32) # [B]
+                max_seqlen = seqlens.max().item() # we will pass this to flash attn func
+                cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0), (1, 0)) # [B+1], concat 0th idx
+
+                assert (
+                    seqlens.shape == (B,)
+                ), f"expected: {(B,)}, got {seqlens.shape}"
+                assert (
+                    cu_seqlens.shape == (B+1,)
+                ), f"expected: {B+1,}, got {cu_seqlens.shape}"
+                assert (
+                    cu_seqlens.dtype == torch.int32
+                ), f"expected int32, got {cu_seqlens.dtype}"
+
+                # Flatten padding mask to get valid tokens
+                valid_tokens = padding_mask.flatten() # [B*T]
+
+                assert (
+                    valid_tokens.shape == (B*T,)
+                ), f"expected: {(B*T,)}, got {valid_tokens.shape}"
+
+                # Flatten qkv and reshape for attention output
+                # we have: qkv_stacked = [B, T, num_heads, 3, head_dim]
+                # we want: qkv_flattened = [B*T, 3, num_heads, head_dim]
+                qkv_flattened = (
+                    qkv_stacked
+                    .view(-1, self.num_heads, 3, self.head_dim) # [B*T, num_heads, 3, head_dim]
+                    .transpose(1, 2) # [B*T, 3, num_heads, head_dim]
+                    .contiguous()
+                )
+                
+                assert (
+                    qkv_flattened.shape == (B*T, 3, self.num_heads, self.head_dim)
+                ), f"expected: {(B*T, 3, self.num_heads, self.head_dim)}, got {qkv_flattened.shape}"
+
+                # flash attn
+                attn_out = flash_attn_varlen_qkvpacked_func(
+                    qkv_flattened,
+                    cu_seqlens,
+                    max_seqlen,
+                    causal=causal,
+                    softmax_scale=self.softmax_scale,
+                    window_size=(left_window, right_window),
+                ) # [B * T, num_heads, head_dim]
+
+                assert (
+                    attn_out.shape == (B*T, self.num_heads, self.head_dim)
+                ), f"expected: {(B*T, self.num_heads, self.head_dim)}, got {attn_out.shape}"
+
+                # [B, T, d_model]
+                attn_out = attn_out.view(B, T, -1)
+
+                return attn_out
+
+            else:
+                raise ValueError("only causal + padding supported")
+            
         else:
             return self._torch_attention(query, key, value, causal, padding_mask)
 
@@ -147,7 +235,7 @@ class CausalSelfAttention(nn.Module):
         Returns:
             torch.Tensor: Output tensor of same shape.
         """
-        # Reshape to [B, num_heads or 1, T, head_dim]
+        # Reshape to [B, :, T, head_dim], where : can be num_heads or 1 for KV else num_heads
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
@@ -177,7 +265,9 @@ class CausalSelfAttention(nn.Module):
                     )
                 ) # [T_q, T_k]
 
-                assert torch.all(causal_mask.float().triu(1) == 0), "Upper triangle is not masked correctly!"
+                assert torch.all(
+                    causal_mask.float().triu(1) == 0
+                ), f"Causal masking failed, \n{causal_mask.float().triu(1)}"
 
                 assert (
                     causal_mask.shape == (query.size(2), key.size(2))
@@ -201,6 +291,11 @@ class CausalSelfAttention(nn.Module):
             ) # [B, num_heads, T_q, T_k]
         else:
             attn_mask = None
+
+        if attn_mask is not None:
+            assert (
+                attn_mask.shape == (query.size(0), self.num_heads, query.size(2), key.size(2))
+            ), f"expected {(query.size(0), self.num_heads, query.size(2), key.size(2))}, got {attn_mask.shape}"
 
         attn_out = F.scaled_dot_product_attention(
             query, key, value,
@@ -258,6 +353,7 @@ class CausalSelfAttention(nn.Module):
 
         # Get attention output
         attn_out = self._optimized_attention(
+            x,
             query=q, 
             key=k, 
             value=v,
@@ -454,7 +550,7 @@ class CausalSelfAttention(nn.Module):
                 layer_idx=layer_idx
             )
 
-            return attn_out
+            return self.o_proj(attn_out)
 
 class CausalSelfAttentionBlock(nn.Module):
     """Causal attention block applying residuals, RMSNorm, dropout, and attention.
@@ -585,4 +681,3 @@ def test_attention():
 if __name__ == "__main__":
     x = test_attention()
     print(x.shape)
-    
