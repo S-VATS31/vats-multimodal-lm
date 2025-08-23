@@ -89,7 +89,8 @@ class AutoregressiveTransformerBlock(nn.Module):
         left_window: int,
         right_window: int,
         use_cache: bool,
-        padding_mask: Optional[torch.Tensor] = None,
+        causal_padding_mask: Optional[torch.Tensor] = None,
+        cross_padding_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCache] = None,
         layer_idx: Optional[int] = None
     ) -> torch.Tensor:
@@ -103,7 +104,8 @@ class AutoregressiveTransformerBlock(nn.Module):
             left_window (int): Left window for SWA.
             right_window (int): Right window for SWA.
             use_cache (bool): Whether to use KV cache or not.
-            padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
+            causal_padding_mask (Optional[torch.Tensor]): Padding mask for autoregressive image gen. Shape: [B, H*W].
+            cross_padding_mask (Optional[torch.Tensor]): Padding mask for text encoder. Shape: [B, T_k].
             kv_cache (Optional[KVCache]): KVCache module.
             layer_idx (Optional[int]): Current layer to update KV cache for.
         """
@@ -116,14 +118,16 @@ class AutoregressiveTransformerBlock(nn.Module):
                 left_window=left_window,
                 right_window=right_window,
                 use_cache=use_cache,
-                padding_mask=padding_mask,
+                padding_mask=causal_padding_mask,
                 kv_cache=kv_cache,
                 layer_idx=layer_idx
             )
 
             # Cross attention block
             cross_attention_out = self.cross_attention_block(
-                causal_attention_out, text_embeddings=text_embeddings
+                causal_attention_out, 
+                text_embeddings=text_embeddings,
+                padding_mask=cross_padding_mask
             )
 
             # FFN block
@@ -171,8 +175,12 @@ def test_transformer_block():
     T_k = 16
     x = torch.randn(B, T_q, d_model).to(device)
     text_embeddings = torch.randn(B, T_k, d_model).to(device)
-    padding_mask = torch.randint(
+    # 2 seperate masks
+    image_padding_mask = torch.randint(
         0, 2, (B, T_q), dtype=torch.bool
+    ).to(device)
+    text_padding_mask = torch.randint(
+        0, 2, (B, T_k), dtype=torch.bool
     ).to(device)
     x_out = block(
         x,
@@ -182,7 +190,8 @@ def test_transformer_block():
         left_window=-1,
         right_window=-1,
         use_cache=True,
-        padding_mask=padding_mask,
+        causal_padding_mask=image_padding_mask,
+        cross_padding_mask=text_padding_mask,
         kv_cache=kv_cache,
     )
 
