@@ -412,12 +412,21 @@ class CausalSelfAttention(nn.Module):
         """
         assert x.dim() == 3, f"x must be 3 dim tensor, got {x.dim()} dims."
         B, T, _ = x.shape
+        
+        # Handle empty input (tokens=T=0)
         if T == 0:
-            return (
-                torch.empty(B, 0, self.num_heads, self.head_dim, dtype=dtype, device=device),    # q
-                torch.empty(B, 0, self.query_groups, self.head_dim, dtype=dtype, device=device), # k
-                torch.empty(B, 0, self.query_groups, self.head_dim, dtype=dtype, device=device), # v
-            )
+            if use_mqa and self.query_groups == 1:
+                return (
+                    torch.empty(B, 0, self.num_heads, self.head_dim, dtype=dtype, device=device),
+                    torch.empty(B, 0, 1, self.head_dim, dtype=dtype, device=device),
+                    torch.empty(B, 0, 1, self.head_dim, dtype=dtype, device=device)
+                )
+            else:
+                return (
+                    torch.empty(B, 0, self.num_heads, self.head_dim, dtype=dtype, device=device),
+                    torch.empty(B, 0, self.num_heads, self.head_dim, dtype=dtype, device=device),
+                    torch.empty(B, 0, self.num_heads, self.head_dim, dtype=dtype, device=device)
+                )
 
         # Get q, k, v tensors through fused projection
         if self.use_fused_proj:
