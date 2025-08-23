@@ -132,10 +132,15 @@ class AutoregressiveTransformerBlock(nn.Module):
             return block_out
 
 class AutoregressiveImageTransformer(nn.Module):
+    """Autorgressive image transformer complete module.
+    
+    Args:
+        model_args (ModelArgs): Model hyperparameters.
+    """
     def __init__(self, model_args): # TODO: type hint ModelArgs here
         super().__init__()
 
-        pass
+        self.model_args = model_args
 
     def _init_weights(self, module) -> None:
         pass
@@ -183,4 +188,4 @@ def test_transformer_block():
 
 if __name__ == "__main__":
     x = test_transformer_block()
-    print(x.shape) # [2, 72*144, 512]
+    print(x.shape) # [1, 72*144, 512]
