@@ -12,6 +12,11 @@ from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 from configs.transformers.nlp.generation_args import GenerationArgs
 
 class AutoregressiveTokenGenerator:
+    """Module use for autoregressive token generation.
+    
+    Args:
+        model_args (ModelArgs): Dataclass containing model hyperparameters.
+    """
     def __init__(self, model_args: ModelArgs):
         self.model_args = model_args
 
@@ -84,7 +89,6 @@ class AutoregressiveTokenGenerator:
             logits, _, _ = self.model(
                 input_ids=generated_ids, padding_mask=attention_mask, use_cache=use_cache
             )
-
 
             # Generation loop
             for step in range(actual_max_new_tokens):
@@ -232,7 +236,7 @@ class AutoregressiveTokenGenerator:
         generation_args: GenerationArgs,
         tokenizer,
     ) -> str:
-        """Generate tokens with help of an HF tokenizer.
+        """Generate tokens using a HuggingFace tokenizer.
         
         Args:
             prompt (str): Input string of text to be tokenized.
@@ -261,7 +265,7 @@ class AutoregressiveTokenGenerator:
                     do_sample=generation_args.do_sample,
                     pad_token_id=generation_args.pad_token_id,
                     eos_token_id=generation_args.eos_token_id,
-                    attention_mask=None, # Will automatically create attention mask
+                    attention_mask=None,
                     use_cache=generation_args.use_cache
                 )
 
