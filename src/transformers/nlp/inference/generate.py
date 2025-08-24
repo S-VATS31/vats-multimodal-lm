@@ -303,7 +303,7 @@ def main():
     generator = AutoregressiveTokenGenerator(model_args)
 
     # Input prompt
-    prompt = input("Enter prompt: ")
+    prompt = "A" * 20_000
 
     # Generate and print the output
     output = generator.generate_tokens(prompt, generation_args, tokenizer)
