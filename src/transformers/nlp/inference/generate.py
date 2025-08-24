@@ -14,15 +14,13 @@ class AutoregressiveTokenGenerator:
     def __init__(self, model_args: ModelArgs):
         self.model_args = model_args
 
-        # Initialize model
         self.model = Transformer(model_args).to(device)
         self.model.eval()
 
-        # Initialize KV Cache
         self.kv_cache = KVCache(
             max_batch_size=model_args.max_batch_size,
             max_seq_len=model_args.max_seq_len,
-            num_heads=model_args.query_groups,
+            num_heads=model_args.num_heads,
             head_dim=model_args.d_model // model_args.num_heads,
             num_layers=model_args.num_layers
         )
@@ -44,7 +42,7 @@ class AutoregressiveTokenGenerator:
         """Generate tokens autoregressively using decoding methods.
 
         Args:
-            input_ids (torch.Tensor): int64 tensor containing tokens.
+            input_ids (torch.LongTensor): LongTensor containing tokenized ids.
             max_new_tokens (int): Maximum number of tokens the model can generate at a time.
             repetition_penalty (float): Penalty that scales logits to discourage repetitive tokens.
             temperature (float): Decoding method to encourage more randomness/determinism based on value.
@@ -65,6 +63,13 @@ class AutoregressiveTokenGenerator:
         if attention_mask is None:
             attention_mask = (input_ids != pad_token_id)
 
+        # Check if initial sequence length plus max_new_tokens exceeds model limit
+        max_total_length = min(self.model_args.max_seq_len, T + max_new_tokens)
+        actual_max_new_tokens = max_total_length - T
+        
+        if actual_max_new_tokens <= 0:
+            return input_ids
+
         generated_ids = input_ids.clone()
         unfinished_sequences = torch.ones(B, dtype=torch.bool).to(device) # All sequences start unfinished
 
@@ -79,11 +84,11 @@ class AutoregressiveTokenGenerator:
                 input_ids=generated_ids, padding_mask=attention_mask, use_cache=use_cache
             )
 
-            if use_cache:
-                self.kv_cache.increment_seq_len(T)
+            # Note: KV cache is automatically updated by the model's forward pass
+            # No need to manually increment sequence length
 
             # Generation loop
-            for step in range(max_new_tokens):
+            for step in range(actual_max_new_tokens):
                 current_seq_len = generated_ids.shape[1]
 
                 # Check sequence length limit
@@ -95,7 +100,11 @@ class AutoregressiveTokenGenerator:
                     break
 
                 # Get logits for next token prediction
-                if use_cache and step > 0:
+                if use_cache and step > 0 and current_seq_len < self.model_args.max_seq_len - 1:
+                    # Check if we can safely increment the cache
+                    if current_seq_len >= self.model_args.max_seq_len:
+                        break
+                        
                     # For cached generation, only process the last token
                     last_token = generated_ids[:, -1:].contiguous()
                     last_attention = torch.ones(B, 1, dtype=torch.bool).to(device)
@@ -105,7 +114,7 @@ class AutoregressiveTokenGenerator:
                     logits, _, _ = self.model(
                         input_ids=last_token, padding_mask=last_attention, use_cache=True
                     )
-                    self.kv_cache.increment_seq_len(1)
+                    # Note: KV cache is automatically updated by the model's forward pass
                 else:
                     # For non-cached or first step, process full sequence
                     if attention_mask.shape[1] < current_seq_len:
@@ -121,7 +130,7 @@ class AutoregressiveTokenGenerator:
                     )
 
                 # Get logits for the last position
-                next_token_logits = logits[:, -1, :]
+                next_token_logits = logits[:, -1, :] # [B, V]
 
                 # Apply repetition penatly
                 if repetition_penalty is not None and repetition_penalty != 1.0:
@@ -260,9 +269,13 @@ class AutoregressiveTokenGenerator:
 
         # [0] is to get the first generated sequence
         if generation_args.return_only_new_tokens:
-            generated_text = tokenizer.decode(generated_ids[0][input_ids.shape[1]:], skip_special_tokens=True)
+            generated_text = tokenizer.decode(
+                generated_ids[0][input_ids.shape[1]:], skip_special_tokens=True
+            )
         else:
-            generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+            generated_text = tokenizer.decode(
+                generated_ids[0], skip_special_tokens=True
+            )
         return generated_text
 
 def main():
@@ -287,7 +300,7 @@ def main():
     # Create generator
     generator = AutoregressiveTokenGenerator(model_args)
 
-    # Example prompt
+    # Input prompt
     prompt = input("Enter prompt: ")
 
     # Generate and print the output

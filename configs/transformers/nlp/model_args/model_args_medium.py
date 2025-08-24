@@ -19,7 +19,7 @@ class ModelArgs(PostInitMixin):
     left_window: int = 384
     right_window: int = 0
     vocab_size: int = 65536
-    max_seq_len: int = 2048
+    max_seq_len: int = 4096
     tie_weights: bool = True
     gradient_checkpointing: bool = True
     use_proj_bias: bool = False
