@@ -88,8 +88,6 @@ class Attention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        left_window: int,
-        right_window: int,
         padding_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Optimized attention leveraging global flash attention.
@@ -100,8 +98,6 @@ class Attention(nn.Module):
             value (torch.Tensor): Value tensor of shape [B, T, num_heads, head_dim] or [B, T, 1, head_dim].
             B (int): Batch size.
             T (int): Sequence length.
-            left_window (int): Left window for sliding window attention. Must be -1 for diffusion text encoder.
-            right_window (int): Right window for sliding window attention. Must be -1 for diffusion text encoder.
             padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
 
         Returns:
@@ -197,7 +193,6 @@ class Attention(nn.Module):
                     max_seqlen,
                     causal=False,
                     softmax_scale=self.softmax_scale,
-                    window_size=(left_window, right_window),
                 ) # [B * T, num_heads, head_dim]
 
                 assert (
@@ -465,11 +460,8 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        left_window: int,
-        right_window: int,
         enable_mqa: bool,
         padding_mask: Optional[torch.Tensor] = None,
-        use_diffusion: bool = True,
         *,
         _return_qkv: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
@@ -477,12 +469,9 @@ class Attention(nn.Module):
         
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
-            left_window (int): Left window for SWA.
-            right_window (int): Right window for SWA.
             enable_mqa (bool): Whether to use MQA or not.
             padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
             use_diffusion (bool): Whether this encoder will be used for diffusion or not.
-                Will set left_window, right_window = -1, -1 if use_diffusion=True.
             _return_qkv (bool): Debugging feature; whether to return q, k, v tensors or not.
 
         Returns:
@@ -497,14 +486,10 @@ class Attention(nn.Module):
         with autocast(device_type=device.type, dtype=dtype):
             q, k, v = self._setup_qkv(x, enable_mqa)
             # Global attention for diffusion (image-gen)
-            if use_diffusion:
-                left_window, right_window = -1, -1
 
             # Get attention output
             attn_out = self._optimized_attention(
                 query=q, key=k, value=v,
-                left_window=left_window,
-                right_window=right_window,
                 padding_mask=padding_mask
             )
 
@@ -559,8 +544,6 @@ class AttentionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        left_window: int,
-        right_window: int,
         enable_mqa: bool,
         padding_mask: Optional[torch.Tensor] = None,
         use_diffusion: bool = True,
@@ -569,12 +552,9 @@ class AttentionBlock(nn.Module):
         
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
-            left_window (int): Left window for SWA.
-            right_window (int): Right window for SWA.
             enable_mqa (bool): Whether to use MQA or not.
             padding_mask (torch.Tensor): Padding tensor of shape [B, T].
             use_diffusion (bool): Whether this encoder is being used for diffusion or not.
-                If True, both window sizes will be set to -1 for global attention.
 
         Returns:
             torch.Tensor: Output tensor of same shape as input.
@@ -582,8 +562,6 @@ class AttentionBlock(nn.Module):
         with autocast(device_type=device.type, dtype=dtype):
             return x + self.dropout(self.attention(
                 self.rms_norm(x),
-                left_window=left_window,
-                right_window=right_window,
                 enable_mqa=enable_mqa,
                 padding_mask=padding_mask,
                 use_diffusion=use_diffusion,
@@ -598,9 +576,10 @@ def main():
     ).to(device)
     B, T = 4, 16
     x = torch.randn(B, T, d_model).to(device)
-    left_window, right_window = -1, -1
     padding_mask = torch.randint(0, 2, (B, T), dtype=torch.bool).to(device)
-    x_out, q, k, v = attention(x, left_window, right_window, True, padding_mask, True, _return_qkv=True)
+    x_out, q, k, v = attention.forward(
+        x, enable_mqa=True, padding_mask=padding_mask, _return_qkv=True
+    )
     return x_out, q, k, v
 
 if __name__ == "__main__":
