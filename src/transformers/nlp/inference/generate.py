@@ -6,7 +6,8 @@ import torch
 import torch.nn.functional as F
 from torch.amp import autocast
 
-from src.transformers.nlp.model import Transformer, KVCache
+from src.optimized_attention import KVCache
+from src.transformers.nlp.model import Transformer
 from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 from configs.transformers.nlp.generation_args import GenerationArgs
 
@@ -84,8 +85,6 @@ class AutoregressiveTokenGenerator:
                 input_ids=generated_ids, padding_mask=attention_mask, use_cache=use_cache
             )
 
-            # Note: KV cache is automatically updated by the model's forward pass
-            # No need to manually increment sequence length
 
             # Generation loop
             for step in range(actual_max_new_tokens):
@@ -114,7 +113,6 @@ class AutoregressiveTokenGenerator:
                     logits, _, _ = self.model(
                         input_ids=last_token, padding_mask=last_attention, use_cache=True
                     )
-                    # Note: KV cache is automatically updated by the model's forward pass
                 else:
                     # For non-cached or first step, process full sequence
                     if attention_mask.shape[1] < current_seq_len:
