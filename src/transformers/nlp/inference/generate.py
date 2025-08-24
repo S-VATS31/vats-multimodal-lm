@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.amp import autocast
 
 from src.optimized_attention import KVCache
-from src.transformers.nlp.model import Transformer
+from src.transformers.nlp.model import AutoregressiveTextTransformer
 from configs.transformers.nlp.model_args.model_args_medium import ModelArgs
 from configs.transformers.nlp.generation_args import GenerationArgs
 
@@ -15,7 +15,7 @@ class AutoregressiveTokenGenerator:
     def __init__(self, model_args: ModelArgs):
         self.model_args = model_args
 
-        self.model = Transformer(model_args).to(device)
+        self.model = AutoregressiveTextTransformer(model_args).to(device)
         self.model.eval()
 
         self.kv_cache = KVCache(
