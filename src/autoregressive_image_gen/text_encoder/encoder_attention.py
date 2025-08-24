@@ -471,7 +471,6 @@ class Attention(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
             enable_mqa (bool): Whether to use MQA or not.
             padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
-            use_diffusion (bool): Whether this encoder will be used for diffusion or not.
             _return_qkv (bool): Debugging feature; whether to return q, k, v tensors or not.
 
         Returns:
@@ -546,7 +545,6 @@ class AttentionBlock(nn.Module):
         x: torch.Tensor,
         enable_mqa: bool,
         padding_mask: Optional[torch.Tensor] = None,
-        use_diffusion: bool = True,
     ) -> torch.Tensor:
         """Forward pass of attention block.
         
@@ -554,7 +552,6 @@ class AttentionBlock(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
             enable_mqa (bool): Whether to use MQA or not.
             padding_mask (torch.Tensor): Padding tensor of shape [B, T].
-            use_diffusion (bool): Whether this encoder is being used for diffusion or not.
 
         Returns:
             torch.Tensor: Output tensor of same shape as input.
@@ -564,7 +561,6 @@ class AttentionBlock(nn.Module):
                 self.rms_norm(x),
                 enable_mqa=enable_mqa,
                 padding_mask=padding_mask,
-                use_diffusion=use_diffusion,
             ))
     
 def main():
