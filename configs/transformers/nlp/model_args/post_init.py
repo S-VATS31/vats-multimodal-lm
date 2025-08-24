@@ -1,5 +1,3 @@
-import warnings
-
 from configs.transformers.nlp.training_args import TrainingArgs
 training_args = TrainingArgs()
 
@@ -57,28 +55,6 @@ class ModelArgsAssertions:
             raise ValueError(
                 f"left_window must be greater than 0, "
                 f"got, {model_args.left_window}"
-            )
-        
-        if not model_args.gradient_checkpointing:
-            warnings.warn(
-                "gradient_checkpointing currently false, set to True to save VRAM."
-            )
-
-        if model_args.use_mqa and model_args.query_groups != 1:
-            warnings.warn(
-                "Got use_mqa=True, but query_groups != 1, setting attention to GQA. "
-                "To use MQA, set use_mqa=True AND query_groups = 1."
-            )
-
-        if not model_args.use_mqa and model_args.query_groups == 1:
-            warnings.warn(
-                "Got query_groups=1, but use_mqa=False, setting attention to GQA "
-                "To use MQA set query_groups = 1 AND use_mqa=True"
-            )
-
-        if model_args.top_k == 1 and model_args.num_experts == 1:
-            warnings.warn(
-                "Got top_k=1 and num_experts=1, MoE not being used."
             )
 
 class PostInitMixin:

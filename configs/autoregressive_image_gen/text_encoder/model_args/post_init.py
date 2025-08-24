@@ -1,7 +1,4 @@
-import warnings
-
 from configs.transformers.nlp.training_args import TrainingArgs
-training_args = TrainingArgs()
 
 class ModelArgsAssertions:
     """Assertions for model arguments."""
@@ -28,11 +25,6 @@ class ModelArgsAssertions:
             raise ValueError(
                 f"Expected d_model * 4 = d_ffn, "
                 f"got {model_args.d_model} * 4 != {model_args.d_ffn}"
-            )
-        
-        if not model_args.use_checkpointing:
-            warnings.warn(
-                "gradient_checkpointing currently false, set to True to save VRAM."
             )
 
 class PostInitMixin:

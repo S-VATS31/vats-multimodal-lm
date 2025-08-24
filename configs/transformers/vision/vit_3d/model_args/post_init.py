@@ -1,5 +1,3 @@
-import warnings
-
 class ModelArgsAssertions:
     """Assertions for model arguments."""
     @staticmethod
@@ -65,12 +63,6 @@ class ModelArgsAssertions:
                 f"target H/W sizes must be divisible by patch sizes, "
                 f"got {args.target_size[0]} % {args.patch_size[1]} != 0 "
                 f"or {args.target_size[1]} % {args.patch_size[2]} != 0"
-            )
-
-        if not args.use_checkpointing:
-            warnings.warn(
-                f"Gradient checkpointing is currently False. It is highly recommended "
-                f"to enable it when training large models."
             )
 
 class PostInitMixin:
