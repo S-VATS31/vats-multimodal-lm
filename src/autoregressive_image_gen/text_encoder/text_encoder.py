@@ -63,22 +63,15 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        left_window: int,
-        right_window: int,
         enable_mqa: bool,
         padding_mask: Optional[torch.Tensor] = None,
-        use_diffusion: bool = True
     ) -> torch.Tensor:
         """Forward pass of Transformer block layer.
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
-            left_window (int): Left window for SWA.
-            right_window (int): Right window for SWA.
             enable_mqa (bool): Whether to use MQA or not.
             padding_mask (torch.Tensor): Padding tensor of shape [B, T].
-            use_diffusion (bool): Whether this encoder is being used for diffusion or not.
-                If True, both window sizes will be set to -1 for global attention.
 
         Returns:
             torch.Tensor: Output tensor of same shape as input.
@@ -86,11 +79,8 @@ class TransformerBlock(nn.Module):
         with autocast(device_type=device.type, dtype=dtype):
             return self.ffn_block(self.attention_block(
                 x,
-                left_window=left_window,
-                right_window=right_window,
                 enable_mqa=enable_mqa,
                 padding_mask=padding_mask,
-                use_diffusion=use_diffusion
             ))
         
 class TransformerTextEncoder(nn.Module):
@@ -124,7 +114,9 @@ class TransformerTextEncoder(nn.Module):
         ])
 
         # Initialize final RMSNorm
-        self.rms_norm = RMSNorm(model_args.d_model, model_args.rms_norm_eps).to(device)
+        self.rms_norm = RMSNorm(
+            model_args.d_model, model_args.rms_norm_eps
+        ).to(device)
 
         # Initialize weights
         self.apply(self._init_weights)
@@ -139,14 +131,8 @@ class TransformerTextEncoder(nn.Module):
         elif isinstance(module, nn.Embedding):
             # Embedding weights: normal or Xavier uniform
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        elif isinstance(module, nn.LayerNorm):
+        elif isinstance(module, RMSNorm):
             nn.init.ones_(module.weight)
-            nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Conv1d):
-            # Sometimes used for positional encoding projections
-            nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
 
     def forward(
         self,
@@ -187,21 +173,15 @@ class TransformerTextEncoder(nn.Module):
                     x = checkpoint(
                         layer,
                         x,
-                        self.model_args.left_window,
-                        self.model_args.right_window,
                         self.model_args.enable_mqa,
                         padding_mask,
-                        self.model_args.use_diffusion,
                         use_reentrant=False
                     )
                 else:
                     x = layer(
                         x=x,
-                        left_window=self.model_args.left_window,
-                        right_window=self.model_args.right_window,
                         enable_mqa=self.model_args.enable_mqa,
                         padding_mask=padding_mask,
-                        use_diffusion=self.model_args.use_diffusion
                     )
 
             assert (
