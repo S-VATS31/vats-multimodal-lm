@@ -149,13 +149,15 @@ class Transformer(nn.Module):
         self.kv_cache = KVCache(
             max_batch_size=model_args.max_batch_size,
             max_seq_len=model_args.max_seq_len,
-            num_heads=model_args.query_groups,
+            num_heads=model_args.num_heads,
             head_dim=model_args.d_model // model_args.num_heads,
             num_layers=model_args.num_layers,
         )
 
         # Language modeling head, bias=False for weight tying
-        self.lm_head = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False).to(device)
+        self.lm_head = nn.Linear(
+            model_args.d_model, model_args.vocab_size, bias=False
+        ).to(device)
 
         self.apply(self._init_weights)
 
@@ -322,3 +324,22 @@ class Transformer(nn.Module):
             ), f"logits must have 3 dimenions, got {logits.dim()}"
 
             return logits, cache_outs, total_aux_loss
+
+def test_model_forward():
+    model_args = ModelArgs()
+    model = Transformer(model_args).to(device)
+    B, T = 4, 16
+    input_ids = torch.randint(
+        0, model_args.vocab_size, (B, T), dtype=torch.int64
+    ).to(device)
+    padding_mask = torch.randint(0, 2, (B, T), dtype=torch.bool).to(device)
+    use_cache = True
+    logits = model(
+        input_ids, padding_mask, use_cache
+    )[0]
+    return logits
+
+if __name__ == "__main__":
+    logits = test_model_forward()
+    print(logits.shape) # [4, 16, 65336]
+    

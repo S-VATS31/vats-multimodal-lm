@@ -241,11 +241,22 @@ class KVCache:
         new_seq_len = k.size(1)
         # Ensure current T + new T <= max T
         if self.current_seq_len + new_seq_len > self.max_seq_len:
-            raise ValueError(f"Sequence length {self.current_seq_len + new_seq_len} exceeds maximum {self.max_seq_len}")
+            # Truncate to clear space
+            available_space = self.max_seq_len - self.current_seq_len
+            if available_space <= 0:
+                return
+            
+            # Truncate k and v to fit available space
+            k = k[:, :available_space]
+            v = v[:, :available_space]
+            new_seq_len = available_space
 
         # Update cache with new key and value tensors
         self.cache[layer_idx]['k'][:, self.current_seq_len:self.current_seq_len + new_seq_len] = k
         self.cache[layer_idx]['v'][:, self.current_seq_len:self.current_seq_len + new_seq_len] = v
+        
+        # Automatically increment sequence length after successful update
+        self.current_seq_len += new_seq_len
 
     def get(
         self, 
@@ -270,14 +281,6 @@ class KVCache:
             self.cache[layer_idx]['k'][:, :seq_len],
             self.cache[layer_idx]['v'][:, :seq_len]
         )
-
-    def increment_seq_len(self, increment: int) -> None:
-        """Increment the current sequence length after updating the cache.
-
-        Args:
-            increment (int): Amount to increment the current sequence length.
-        """
-        self.current_seq_len += increment
 
     def reset(self) -> None:
         """Reset the cache to its initial state."""
@@ -494,11 +497,15 @@ class Attention(nn.Module):
                 k.size(2) == self.num_heads or k.size(2) == 1
             ), f"k.size(2) must be {self.num_heads} or 1, got {k.size(2)}"
             assert (
-                v.size(2) == self.num_heads or k.size(2) == 1
-            ), f"k.size(2) must be {self.num_heads} or 1, got {k.size(2)}"
+                v.size(2) == self.num_heads or v.size(2) == 1
+            ), f"v.size(2) must be {self.num_heads} or 1, got {v.size(2)}"
 
             # Handle KV cache
-            if use_cache and kv_cache.current_seq_len is not None and kv_cache.current_seq_len > 0:
+            if (
+                use_cache
+                and kv_cache.current_seq_len is not None 
+                and kv_cache.current_seq_len > 0
+            ):
                 cached_k, cached_v = kv_cache.get(layer_idx, kv_cache.current_seq_len)
                 k = torch.cat([cached_k, k], dim=1)
                 v = torch.cat([cached_v, v], dim=1)
@@ -663,7 +670,7 @@ class Attention(nn.Module):
                             f"Expected padding mask of shape ({B, T}), got {padding_mask.shape}"
                             )
                     padding_mask = padding_mask.bool() # Ensure padding mask is a boolean tensor
-                    attn_mask = padding_mask.unsqueeze(1).unsqueeze(2) # [B, 1, 1, T]
+                    attn_mask = padding_mask[:, None, :, None] # [B, 1, T_q, T_k]
                     attn_mask = attn_mask.expand(B, 1, T, k.size(2)) # [B, 1, T_q, T_k]
                     assert (
                         attn_mask.shape == (B, 1, q.size(2), k.size(2))
@@ -805,18 +812,20 @@ class AttentionBlock(nn.Module):
 def test_attention(use_pad: bool):
     d_model, num_heads, query_groups, theta = 512, 32, 8, 10000.0
     softmax_scale = 1 / (d_model // num_heads) ** 0.5
-    attention = Attention(d_model, num_heads, query_groups, theta, softmax_scale, False, True)
+    attention = AttentionBlock(
+        d_model, num_heads, query_groups, softmax_scale, False, True, 0.15, theta, 1e-7
+    )
     B, T = 4, 16
     x = torch.randn(B, T, d_model).to(device)
     padding_mask = None
     if use_pad:
         padding_mask = torch.randint(0, 2, (B, T), dtype=torch.bool).to(device)
     kv_cache = KVCache(
-    max_batch_size=4,
-    max_seq_len=16,
-    num_heads=32,
-    head_dim=512 // 32,
-    num_layers=4
+        max_batch_size=4,
+        max_seq_len=16,
+        num_heads=32,
+        head_dim=512 // 32,
+        num_layers=4
     )
 
     x_out, cache_out = attention(
@@ -833,5 +842,5 @@ def test_attention(use_pad: bool):
     return x_out, cache_out
 
 if __name__ == "__main__":
-    x, _ = test_attention(use_pad=True)
+    x, _ = test_attention(True)
     print(x.shape)

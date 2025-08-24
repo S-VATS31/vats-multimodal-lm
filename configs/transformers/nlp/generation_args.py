@@ -24,8 +24,8 @@ class GenerationArgs:
     top_p: float = 0.95
     do_sample: bool = True
     pad_token_id: Optional[int] = None
-    eos_token_id: Optional[int] = None  # Typically: eos_token_id = vocab_size - 1
+    eos_token_id: Optional[int] = None
     use_cache: bool = True
-    repetition_penalty: float = 1.5
+    repetition_penalty: float = 1.7
     return_only_new_tokens: bool = True
     generation_frequency: int = 10_000_000_000
