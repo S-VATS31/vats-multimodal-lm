@@ -389,9 +389,8 @@ class CausalSelfAttention(nn.Module):
             key = torch.cat([cached_k, key], dim=1)
             value = torch.cat([cached_v, value], dim=1)
 
-        # Update KVCache and increment sequence length
+        # Update KVCache (internally updates current seqlen)
         kv_cache.update(layer_idx, key, value)
-        kv_cache.current_seq_len = key.size(1)
 
     def _setup_qkv(
         self,

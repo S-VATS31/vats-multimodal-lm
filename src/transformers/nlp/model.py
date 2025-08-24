@@ -111,7 +111,7 @@ class TransformerBlock(nn.Module):
             return moe_out, cache_out, aux_loss
 
 
-class Transformer(nn.Module):
+class AutoregressiveTextTransformer(nn.Module):
     """Complete Transformer class stacking all decoder blocks.
 
     Args:
@@ -327,7 +327,7 @@ class Transformer(nn.Module):
 
 def test_model_forward():
     model_args = ModelArgs()
-    model = Transformer(model_args).to(device)
+    model = AutoregressiveTextTransformer(model_args).to(device)
     B, T = 4, 16
     input_ids = torch.randint(
         0, model_args.vocab_size, (B, T), dtype=torch.int64
