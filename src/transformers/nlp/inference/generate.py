@@ -303,13 +303,13 @@ def main():
     generator = AutoregressiveTokenGenerator(model_args)
 
     # Input prompt
-    prompt = "A" * 20_000
+    prompt = input(f"Enter prommt: ")
 
     # Generate and print the output
     output = generator.generate_tokens(prompt, generation_args, tokenizer)
     print("=== Generated Text ===")
     print(output)
 
-
 if __name__ == "__main__":
     main()
+    
