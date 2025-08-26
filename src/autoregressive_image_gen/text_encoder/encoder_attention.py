@@ -16,7 +16,7 @@ from torch.amp import autocast
 from src.optimized_attention import RoPE
 from src.rms_norm import RMSNorm
 
-from utils.attention_utils import extend_kv_heads, setup_projections
+from utils.attention_utils import extend_kv_heads, setup_projections, apply_qk_norm
 
 class Attention(nn.Module):
     """Attention module for encoder.
@@ -174,10 +174,10 @@ class Attention(nn.Module):
 
                 # Index by valid tokens
                 qkv_out = (
-                        qkv_stacked.view(-1, self.num_heads, 3, self.head_dim)
-                        .transpose(1, 2)
-                        .contiguous()
-                        )[valid_tokens] # [B * T, 3, num_heads, head_dim]
+                    qkv_stacked.view(-1, self.num_heads, 3, self.head_dim)
+                    .transpose(1, 2)
+                    .contiguous()
+                )[valid_tokens] # [B * T, 3, num_heads, head_dim]
                 
                 assert (
                     qkv_out.shape == (B*T, 3, self.num_heads, self.head_dim)
@@ -217,9 +217,7 @@ class Attention(nn.Module):
             
             # No padding mask, raise error
             else:
-                raise ValueError(
-                    "padding_mask must be given for text encoder."
-                )
+                raise ValueError("padding_mask must be given for text encoder.")
         else:
             return self._torch_attention(query, key, value, padding_mask)
         
@@ -315,12 +313,15 @@ class Attention(nn.Module):
     def _setup_qkv(
         self,
         x: torch.Tensor,
-        enable_mqa: bool
+        enable_mqa: bool,
+        use_qk_norm: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Set up query, key, and value vectors for attention.
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
+            enable_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to QK normalization or not.
 
         Returns:
             Tuple:
@@ -405,6 +406,10 @@ class Attention(nn.Module):
         k = k.view(B, T, self.query_groups, self.head_dim)
         v = v.view(B, T, self.query_groups, self.head_dim)
 
+        # Apply QK normalization
+        if use_qk_norm:
+            q, k = apply_qk_norm(query=q, key=k)
+
         assert (
             q.shape == (B, T, self.num_heads, self.head_dim)
         ), f"q must have shape of {(B, T, self.num_heads, self.head_dim)}, got {q.shape}"
@@ -461,6 +466,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         enable_mqa: bool,
+        use_qk_norm: bool,
         padding_mask: Optional[torch.Tensor] = None,
         *,
         _return_qkv: bool = False,
@@ -470,8 +476,11 @@ class Attention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
             enable_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
-            _return_qkv (bool): Debugging feature; whether to return q, k, v tensors or not.
+        
+        Keyword Arguments:
+            _return_qkv (bool): Whether to return QKV or not. ONLY USE FOR DEBUGGING.
 
         Returns:
             Union:
@@ -483,8 +492,11 @@ class Attention(nn.Module):
                     - torch.Tensor: Value tensor.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            q, k, v = self._setup_qkv(x, enable_mqa)
-            # Global attention for diffusion (image-gen)
+            q, k, v = self._setup_qkv(
+                x, 
+                enable_mqa=enable_mqa, 
+                use_qk_norm=use_qk_norm
+            )
 
             # Get attention output
             attn_out = self._optimized_attention(
@@ -544,6 +556,7 @@ class AttentionBlock(nn.Module):
         self,
         x: torch.Tensor,
         enable_mqa: bool,
+        use_qk_norm: bool,
         padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass of attention block.
@@ -551,6 +564,7 @@ class AttentionBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
             enable_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization.
             padding_mask (torch.Tensor): Padding tensor of shape [B, T].
 
         Returns:
@@ -560,6 +574,7 @@ class AttentionBlock(nn.Module):
             return x + self.dropout(self.attention(
                 self.rms_norm(x),
                 enable_mqa=enable_mqa,
+                use_qk_norm=use_qk_norm,
                 padding_mask=padding_mask,
             ))
     
@@ -573,8 +588,8 @@ def main():
     B, T = 4, 16
     x = torch.randn(B, T, d_model).to(device)
     padding_mask = torch.randint(0, 2, (B, T), dtype=torch.bool).to(device)
-    x_out, q, k, v = attention.forward(
-        x, enable_mqa=True, padding_mask=padding_mask, _return_qkv=True
+    x_out, q, k, v = attention(
+        x, enable_mqa=False, use_qk_norm=True, padding_mask=padding_mask, _return_qkv=True
     )
     return x_out, q, k, v
 
