@@ -64,6 +64,7 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         enable_mqa: bool,
+        use_qk_norm: bool,
         padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass of Transformer block layer.
@@ -71,6 +72,7 @@ class TransformerBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
             enable_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             padding_mask (torch.Tensor): Padding tensor of shape [B, T].
 
         Returns:
@@ -80,6 +82,7 @@ class TransformerBlock(nn.Module):
             return self.ffn_block(self.attention_block(
                 x,
                 enable_mqa=enable_mqa,
+                use_qk_norm=use_qk_norm,
                 padding_mask=padding_mask,
             ))
         
@@ -94,7 +97,10 @@ class TransformerTextEncoder(nn.Module):
 
         self.model_args = model_args
 
-        self.token_embedding = nn.Embedding(model_args.vocab_size, model_args.d_model).to(device)
+        # Set up embedding layer
+        self.token_embedding = nn.Embedding(
+            model_args.vocab_size, model_args.d_model
+        ).to(device)
         self.dropout = nn.Dropout(p=model_args.dropout).to(device)
 
         # Stack encoder blocks
@@ -174,13 +180,15 @@ class TransformerTextEncoder(nn.Module):
                         layer,
                         x,
                         self.model_args.enable_mqa,
+                        self.model_args.use_qk_norm,
                         padding_mask,
                         use_reentrant=False
                     )
                 else:
                     x = layer(
-                        x=x,
+                        x,
                         enable_mqa=self.model_args.enable_mqa,
+                        use_qk_norm=self.model_args.use_qk_norm,
                         padding_mask=padding_mask,
                     )
 
