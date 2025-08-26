@@ -21,3 +21,5 @@ class ModelArgs(PostInitMixin):
     rms_norm_eps: float = 1e-7
     num_classes: int = 1000
     use_checkpointing: bool = False
+    use_mqa: bool = False
+    use_qk_norm: bool = True
