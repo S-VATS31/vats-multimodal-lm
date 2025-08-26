@@ -26,6 +26,7 @@ class ModelArgs(PostInitMixin):
     use_proj_bias: bool = False
     use_fused_proj: bool = True
     use_mqa: bool = False
+    use_qk_norm: bool = True
 
     def __post_init__(self):
         """Post initialization for dynamic softmax scale."""
