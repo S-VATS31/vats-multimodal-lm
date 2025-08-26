@@ -85,6 +85,7 @@ class AutoregressiveTransformerBlock(nn.Module):
         x: torch.Tensor,
         text_embeddings: torch.Tensor,
         use_mqa: bool,
+        use_qk_norm: bool,
         causal: bool,
         left_window: int,
         right_window: int,
@@ -100,6 +101,7 @@ class AutoregressiveTransformerBlock(nn.Module):
             x (torch.Tensor): Image tokens of shape [B, H*W, d_model].
             text_embeddings (torch.Tensor): Text tokens of shape [B, T, d_model].
             use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             causal (bool): Whether to use causal masking or not.
             left_window (int): Left window for SWA.
             right_window (int): Right window for SWA.
@@ -114,6 +116,7 @@ class AutoregressiveTransformerBlock(nn.Module):
             causal_attention_out = self.causal_attention_block(
                 x,
                 use_mqa=use_mqa,
+                use_qk_norm=use_qk_norm,
                 causal=causal,
                 left_window=left_window,
                 right_window=right_window,
@@ -186,6 +189,7 @@ def test_transformer_block():
         x,
         text_embeddings,
         use_mqa=False,
+        use_qk_norm=True,
         causal=True,
         left_window=-1,
         right_window=-1,
