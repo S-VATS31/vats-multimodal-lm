@@ -15,7 +15,7 @@ from torch.amp import autocast
 
 from src.rms_norm import RMSNorm
 from src.optimized_attention import KVCache
-from utils.attention_utils import extend_kv_heads, setup_projections
+from utils.attention_utils import extend_kv_heads, setup_projections, apply_qk_norm
 from src.autoregressive_image_gen.autoregressive_transformer.attention.rope_2d import NTKRoPE2D
 
 class CausalSelfAttention(nn.Module):
@@ -297,13 +297,14 @@ class CausalSelfAttention(nn.Module):
                 attn_mask.shape == (query.size(0), self.num_heads, query.size(2), key.size(2))
             ), f"expected {(query.size(0), self.num_heads, query.size(2), key.size(2))}, got {attn_mask.shape}"
 
+        # [B, num_heads, T, head_dim]
         attn_out = F.scaled_dot_product_attention(
             query, key, value,
             attn_mask=attn_mask,
             is_causal=causal if padding_mask is None else False,
             scale=self.softmax_scale,
             enable_gqa=False # Manually done
-        ) # [B, num_heads, T, head_dim]
+        )
 
         assert (
             attn_out.shape == (query.size(0), self.num_heads, query.size(2), self.head_dim)
@@ -327,6 +328,7 @@ class CausalSelfAttention(nn.Module):
         self,
         x: torch.Tensor,
         use_mqa: bool,
+        use_qk_norm: bool,
         causal: bool,
         left_window: int,
         right_window: int,
@@ -340,12 +342,24 @@ class CausalSelfAttention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
             use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
+            causal (bool): Whether to use causal masking or not.
+            left_window (int): Left window for SWA.
+            right_window (int): Right window for SWA.
+            use_cache (bool): Whether to use KV caching or notl.
+            padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
+            kv_cache (Optional[KVCache]): KVCache module.
+            layer_idx (Optional[int]): Current layer to update KV's with respect to.
 
         Returns:
             torch.Tensor: Output tensor of shape [B, T, d_model].
         """
         # Get q, k, v
-        q, k, v = self._setup_qkv(x, use_mqa)
+        q, k, v = self._setup_qkv(
+            x, 
+            use_mqa=use_mqa, 
+            use_qk_norm=use_qk_norm
+        )
 
         # Update cache if given
         if use_cache and kv_cache is not None and layer_idx is not None:
@@ -395,13 +409,15 @@ class CausalSelfAttention(nn.Module):
     def _setup_qkv(
         self,
         x: torch.Tensor,
-        use_mqa: bool
+        use_mqa: bool,
+        use_qk_norm: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Set up qkv tensors using input tensor.
         
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
             use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
 
         Returns:
             Tuple:
@@ -480,6 +496,10 @@ class CausalSelfAttention(nn.Module):
             f"got k.shape = {k.shape}, got v.shape = {v.shape}"
         )
 
+        # Apply QK normalization
+        if use_qk_norm:
+            q, k = apply_qk_norm(query=q, key=k)
+
         # Apply NTKRoPE2D
         # q = self.ntk_rope(q)
         # k = self.ntk_rope(k)
@@ -512,6 +532,7 @@ class CausalSelfAttention(nn.Module):
         self,
         x: torch.Tensor,
         use_mqa: bool,
+        use_qk_norm: bool,
         causal: bool,
         left_window: int,
         right_window: int,
@@ -525,6 +546,7 @@ class CausalSelfAttention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
             use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             causal (bool): Whether to use causal or not.
             left_window (int): Left window for causal masking.
             right_window (int): Right window for causal masking.
@@ -537,18 +559,19 @@ class CausalSelfAttention(nn.Module):
             torch.Tensor: Output tensor of same shape.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            # Global attention
-            if not self.use_windowed_attn:
-                left_window, right_window = -1, -1
-
             # Set right window to 0 for causal LM
             if causal:
                 right_window = 0
+            
+            # Global attention
+            if not self.use_windowed_attn:
+                left_window, right_window = -1, -1
             
             # Attention output with caching
             attn_out = self._causal_self_attention(
                 x,
                 use_mqa=use_mqa,
+                use_qk_norm=use_qk_norm,
                 causal=causal,
                 left_window=left_window,
                 right_window=right_window,
@@ -616,6 +639,7 @@ class CausalSelfAttentionBlock(nn.Module):
         self,
         x: torch.Tensor,
         use_mqa: bool,
+        use_qk_norm: bool,
         causal: bool,
         left_window: int,
         right_window: int,
@@ -629,6 +653,7 @@ class CausalSelfAttentionBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
             use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             causal (bool): Whether to use causal or not.
             left_window (int): Left window for causal masking.
             right_window (int): Right window for causal masking.
@@ -644,6 +669,7 @@ class CausalSelfAttentionBlock(nn.Module):
             return x + self.dropout(self.attention(
                 self.rms_norm(x),
                 use_mqa=use_mqa,
+                use_qk_norm=use_qk_norm,
                 causal=causal,
                 left_window=left_window,
                 right_window=right_window,
@@ -676,6 +702,7 @@ def test_attention():
     x_out = attention(
         x,
         use_mqa=False,
+        use_qk_norm=False,
         causal=True,
         left_window=-1,
         right_window=-1,
