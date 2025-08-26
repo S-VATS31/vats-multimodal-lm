@@ -1,9 +1,8 @@
-# TODO: add optimized version of RMSNorm such as nn.RMSNorm or an alt. to xformers RMSNorm.
-
 from configs.setup_env import device, dtype
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.amp import autocast
 
 class RMSNorm(nn.Module):
@@ -27,10 +26,10 @@ class RMSNorm(nn.Module):
         """Perform forward pass of RMSNorm layer.
 
         Args:
-            x (torch.Tensor): Input tensor of shape [B, N, d_model].    
+            x (torch.Tensor): Input tensor of shape [B, T, d_model].    
         """
         with autocast(device_type=device.type, dtype=dtype):
             return self.weight * (
-                x / (torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True)) + self.eps)
+                F.normalize(x, p=2, dim=-1)
             )
         
