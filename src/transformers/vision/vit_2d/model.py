@@ -74,6 +74,7 @@ class SpatialTransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         use_mqa: bool,
+        use_qk_norm: bool,
         left_window: int,
         right_window: int
     ) -> torch.Tensor:
@@ -82,6 +83,7 @@ class SpatialTransformerBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, H*W, d_model].
             use_mqa (bool): Whether to use MQA or not.
+            use_qkv_norm (bool): Whether to use QK normalization or not.
             left_window (int): Left window for SWA.
             right_window (int): Right window for SWA.
 
@@ -91,8 +93,9 @@ class SpatialTransformerBlock(nn.Module):
         with autocast(device_type=device.type, dtype=dtype):
             return self.ffn_block(
                 self.attention_block(
-                    x=x,
+                    x,
                     use_mqa=use_mqa,
+                    use_qk_norm=use_qk_norm,
                     left_window=left_window,
                     right_window=right_window
                 )
@@ -206,6 +209,7 @@ class ImageEncoderTransformer(nn.Module):
                     layer,
                     x,
                     self.model_args.use_mqa,
+                    self.model_args.use_qk_norm,
                     self.model_args.left_window,
                     self.model_args.right_window,
                     use_reentrant=False
@@ -214,6 +218,7 @@ class ImageEncoderTransformer(nn.Module):
                 x = layer(
                     x=x,
                     use_mqa=self.model_args.use_mqa,
+                    use_qk_norm=self.model_args.use_qk_norm,
                     left_window=self.model_args.left_window,
                     right_window=self.model_args.right_window,
                 )
@@ -233,4 +238,7 @@ def test_model_forward():
 
 if __name__ == "__main__":
     x = test_model_forward()
+    # [B, H*W, d_model]
+    # [1, 384//16 * 384//16, 1152]
+    # [1, 576, 1152]
     print(x.shape)
