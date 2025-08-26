@@ -40,17 +40,27 @@ class TransformerBlock(nn.Module):
         super().__init__()
 
         self.attention_block = SpatioTemporalAttentionBlock(
-            d_model, num_heads, query_groups, 
-            rope_theta, patch_size, eps, dropout
+            d_model=d_model, 
+            num_heads=num_heads, 
+            query_groups=query_groups, 
+            rope_theta=rope_theta, 
+            patch_size=patch_size, 
+            eps=eps, 
+            dropout=dropout
         )
         self.gated_ffn_block = FFNBlock(
-            d_model, d_ffn, dropout, eps
+            d_model=d_model, 
+            d_ffn=d_ffn, 
+            dropout=dropout, 
+            eps=eps
         )
 
     def forward(
         self, 
         x: torch.Tensor,
         grid_size: Tuple[int, int, int],
+        use_mqa: bool,
+        use_qk_norm: bool,
         window_size: Optional[Tuple[int, int]] = None,
         padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -59,6 +69,8 @@ class TransformerBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, H*W, d_model].
             grid_size (Tuple[int, int, int]): Grid size parameter for RoPE.
+            use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             window_size (Optional[Tuple[int, int]]): Window size for SWA.
             padding_mask (Optional[torch.Tensor]): Padding tensor.
 
@@ -67,7 +79,14 @@ class TransformerBlock(nn.Module):
         """
         with autocast(device_type=device.type, dtype=dtype):
             return self.gated_ffn_block(
-                self.attention_block(x, grid_size, window_size, padding_mask)
+                self.attention_block(
+                    x,
+                    grid_size=grid_size,
+                    use_mqa=use_mqa,
+                    use_qk_norm=use_qk_norm,
+                    window_size=window_size,
+                    padding_mask=padding_mask
+                )
             )
         
 
@@ -197,6 +216,9 @@ class VideoTransformer(nn.Module):
 
         Returns:
             torch.Tensor: Returns logits of shape [B, num_classses].
+
+        Note:
+            Padding mask is obtained through patch embeddings and therefore not passed here.
         """
         # We only need batch size for assertions as C gets projected to d_model
         # and T, H, W get dynamically calculated through grid size
@@ -232,6 +254,8 @@ class VideoTransformer(nn.Module):
                     layer,
                     x,
                     grid_size,
+                    self.model_args.use_mqa,
+                    self.model_args.use_qk_norm,
                     self.model_args.window_size,
                     padding_mask,
                     use_reentrant=False
@@ -240,6 +264,8 @@ class VideoTransformer(nn.Module):
                 x = layer(
                     x=x,
                     grid_size=grid_size,
+                    use_mqa=self.model_args.use_mqa,
+                    use_qk_norm=self.model_args.use_qk_norm,
                     window_size=self.model_args.window_size,
                     padding_mask=padding_mask
                 )
@@ -261,7 +287,8 @@ class VideoTransformer(nn.Module):
             f"got {x.shape}"
         )
         
-        # Reshape to 3D tensor since LLMs expect [B, N, d_model]
+        # Reshape to 3D tensor since LLMs expect [B, T, d_model]
+        # [B, T*H*W, d_model]
         x = x.view(B, -1, self.model_args.d_model)
         assert (
             x.shape == (B, new_T*new_H*new_W, self.model_args.d_model)
@@ -270,7 +297,7 @@ class VideoTransformer(nn.Module):
             f"got {x.shape}"
         )
 
-        return x # [B, T*H*W, d_model]
+        return x
         
 
 def test_transformer_block(use_pad: bool):
@@ -295,6 +322,8 @@ def test_transformer_block(use_pad: bool):
     x_out = transformer_block(
         x=x,
         grid_size=grid_size,
+        use_mqa=False,
+        use_qk_norm=True,
         window_size=(-1, -1),
         padding_mask=padding_mask,
     )
@@ -308,12 +337,13 @@ def test_entire_forward():
     x_out = model(x)
     return x_out
 
+# if __name__ == "__main__":
+#     x = test_transformer_block(use_pad=True)
+#     print(x.shape) # [1, 1, 16, 744]
+
 if __name__ == "__main__":
     x = test_entire_forward()
-    # [B, T*H*W, d_model]
-    # [1, T//pt * (H//ph) * (W//pw), 2112]
-    # [1, 8//2 * (224//16) * (224//16), 2112]
-    # we do 8//2 because max frames is 8
-    # we do 224 for H and W since our target size is 224
+    # [1, new_T*new_H*new_W, d_model]
+    # [1, 4*16*16, 2112]
     # [1, 784, 2112]
     print(x.shape)
