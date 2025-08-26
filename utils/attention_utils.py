@@ -2,6 +2,7 @@ from typing import Tuple, Union, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 def extend_kv_heads(
     input: torch.Tensor,
@@ -75,3 +76,50 @@ def setup_projections(
             bias=use_proj_bias
         )
         return q_proj, k_proj, v_proj, o_proj
+
+def apply_qk_norm(
+    query: torch.Tensor, 
+    key: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Apply QK normalization to input QK vectors over features dim.
+    
+    Args:
+        query (torch.Tensor): Query tensor.
+        key (torch.Tensor): Key tensor.
+
+    Returns:
+        Tuple:
+            - torch.Tensor: Normalized query tensor.
+            - torch.Tensor: Normalized key tensor.
+
+    Formula:
+        q_norm = q / sqrt(sum(x**2))
+        This is equivalent to calculating the L2 Norm for high-dim tensors.
+    """
+    return (
+        F.normalize(query, p=2, dim=-1),
+        F.normalize(key, p=2, dim=-1)
+    )
+
+# ---------------------------- TESTING ---------------------------- # 
+
+torch.manual_seed(42)
+
+B, T, num_heads, d_model = 2, 16, 32, 512
+head_dim = d_model // num_heads
+q = torch.randn(B, T, num_heads, head_dim)
+k = torch.randn(B, T, num_heads, head_dim)
+
+def _test_qk_norm():
+    query, key = apply_qk_norm(q, k)
+    return query, key
+
+def _test_norm(input: torch.Tensor):
+    return input / torch.sqrt(torch.sum(input ** 2, dim=-1, keepdim=True))
+
+if __name__ == "__main__":
+    q_norm, k_norm = _test_qk_norm()
+    q_calculated_norm = _test_norm(q)
+    print(q[0, 0, 0, 0])
+    print(q_norm[0, 0, 0, 0])
+    print(q_calculated_norm[0, 0, 0, 0])
