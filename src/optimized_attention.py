@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.rms_norm import RMSNorm
-from utils.attention_utils import extend_kv_heads, setup_projections
+from utils.attention_utils import extend_kv_heads, setup_projections, apply_qk_norm
 
 class RoPE(nn.Module):
     """Rotary positional embeddings (RoPE) to be applied to the query and key vectors.
@@ -365,6 +365,7 @@ class Attention(nn.Module):
         layer_idx: Optional[int] = None,
         use_cache: bool = False,
         use_mqa: bool = False,
+        use_qk_norm: bool = True
     ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
         """Forward pass for GQA layer.
 
@@ -380,6 +381,7 @@ class Attention(nn.Module):
             use_cache (bool): Whether to use KV caching during forward pass.
             use_mqa (bool): Whether to use multi-query attention or not.
                 Constraints: query_groups == 1.
+            use_qk_norm (bool): Whether to use QK normalization or not.
 
         Returns:
             Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
@@ -463,6 +465,10 @@ class Attention(nn.Module):
             q = q.view(B, T, self.num_heads, self.head_dim) # [B, T, num_heads, head_dim]
             k = k.view(B, T, self.query_groups, self.head_dim) # [B, T, query_groups, head_dim]
             v = v.view(B, T, self.query_groups, self.head_dim) # [B, T, query_groups, head_dim]
+
+            # Apply QK normalization
+            if use_qk_norm:
+                q, k = apply_qk_norm(query=q, key=k)
 
             # Apply RoPE
             q = self.rope(q) # [B, T, num_heads, head_dim]
@@ -778,17 +784,22 @@ class AttentionBlock(nn.Module):
         kv_cache: Optional[KVCache] = None,
         layer_idx: Optional[int] = None,
         use_cache: bool = False,
-        use_mqa: bool = False
+        use_mqa: bool = False,
+        use_qk_norm: bool = True
     ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
         """Forward pass of the Attention Block.
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, d_model].
-            window_size (Tuple[int, int]): Window size for SWA.
+            left_window (int): Left window for SWA.
+            right_window (int): Right window for SWA.
+            causal (bool): Whether to apply causal masking or not.
             padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T].
-            kv_cache (Optional[KVCache]): Key-value cache for efficient generation.
-            layer_idx (Optional[int]): Index of the current layer for cache access.
-            use_cache (bool): Whether to use KV caching during forward pass.
+            kv_cache (Optional[KVCache]): KVCache module.
+            layer_idx (Optional[int]): Transformer layer to have KV's updated.
+            use_cache (bool): Whether to use KV caching or not.
+            use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
 
         Returns:
             Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
@@ -805,7 +816,8 @@ class AttentionBlock(nn.Module):
                 kv_cache=kv_cache,
                 layer_idx=layer_idx,
                 use_cache=use_cache,
-                use_mqa=use_mqa
+                use_mqa=use_mqa,
+                use_qk_norm=use_qk_norm
             )
             return x + self.dropout(attn_out), cache_out
 
@@ -837,7 +849,8 @@ def test_attention(use_pad: bool):
         kv_cache=kv_cache,
         layer_idx=2,
         use_cache=True,
-        use_mqa=False
+        use_mqa=False,
+        use_qk_norm=True
     )
     return x_out, cache_out
 
