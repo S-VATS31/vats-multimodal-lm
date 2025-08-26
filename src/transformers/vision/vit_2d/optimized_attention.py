@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch.amp import autocast
 
 from src.rms_norm import RMSNorm
-from utils.attention_utils import extend_kv_heads, setup_projections
+from utils.attention_utils import extend_kv_heads, setup_projections, apply_qk_norm
 
 class RoPE(nn.Module):
     """Apply 2D rotary positional embeddings to query, key vectors.
@@ -426,6 +426,7 @@ class SpatialAttention(nn.Module):
         self,
         x: torch.Tensor,
         use_mqa: bool,
+        use_qk_norm: bool,
         left_window: int,
         right_window: int,
     ) -> torch.Tensor:
@@ -434,13 +435,14 @@ class SpatialAttention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, H*W, d_model].
             use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             left_window (int): Left window for SWA.
             right_window (int): Right window for SWA.
 
         Returns:
             torch.Tensor: Output tensor of shape as input.
         """
-        q, k, v = self._setup_qkv(x, use_mqa=use_mqa)
+        q, k, v = self._setup_qkv(x, use_mqa=use_mqa, use_qk_norm=use_qk_norm)
         # Get attention output
         spatial_out = self._optimized_attention(
             x=x,
@@ -456,13 +458,15 @@ class SpatialAttention(nn.Module):
     def _setup_qkv(
         self,
         x: torch.Tensor,
-        use_mqa: bool
+        use_mqa: bool,
+        use_qk_norm: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Setup query, key, and value tensors.
         
         Args:
             x (torch.Tensor): Input tensor of shape [B, H*W, d_model].
             use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
 
         Returns:
             Tuple:
@@ -526,10 +530,12 @@ class SpatialAttention(nn.Module):
         assert (
             v.shape == (B, num_spatial_patches, self.query_groups, self.head_dim)
         ), f"v must have shape of {(B, num_spatial_patches, self.query_groups, self.head_dim)}, got {v.shape}"
+        
+        # Apply QK normalization
+        if use_qk_norm:
+            q, k = apply_qk_norm(query=q, key=k)
 
         # Apply RoPE; forward expects [B, H*W, num_heads, head_dim]
-        # q shape: [B, H*W, num_heads, head_dim]
-        # k shape: [B, H*W, query_groups, head_dim]
         q = self.rope(q)
         k = self.rope(k)
 
@@ -575,6 +581,7 @@ class SpatialAttention(nn.Module):
         self,
         x: torch.Tensor,
         use_mqa: bool,
+        use_qk_norm: bool,
         left_window: int,
         right_window: int
     ) -> torch.Tensor:
@@ -583,6 +590,7 @@ class SpatialAttention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, H*W, d_model].
             use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             left_window (int): Left window for SWA.
             right_window (int): Right window for SWA.
 
@@ -593,10 +601,12 @@ class SpatialAttention(nn.Module):
             # Set windows to -1 if no SWA
             if not self.use_windowed_attn:
                 left_window, right_window = -1, -1
+
             # [B, H*W, d_model]
             spatial_out = self._spatial_attention(
-                x=x,
+                x,
                 use_mqa=use_mqa,
+                use_qk_norm=use_qk_norm,
                 left_window=left_window,
                 right_window=right_window
             )
@@ -659,6 +669,7 @@ class SpatialAttentionBlock(nn.Module):
         self,
         x: torch.Tensor,
         use_mqa: bool,
+        use_qk_norm: bool,
         left_window: int,
         right_window: int,
     ) -> torch.Tensor:
@@ -667,6 +678,7 @@ class SpatialAttentionBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, H*W, d_model].
             use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             left_window (int): Left window for SWA.
             right_window (int): Right window for SWA.
 
@@ -678,6 +690,7 @@ class SpatialAttentionBlock(nn.Module):
                 self.attention(
                     self.rms_norm(x),
                     use_mqa=use_mqa,
+                    use_qk_norm=use_qk_norm,
                     left_window=left_window,
                     right_window=right_window
                 )
@@ -696,7 +709,7 @@ def test_attention_block():
     grid_size = target_size // patch_size
     num_patches = grid_size ** 2
     x = torch.randn(B, num_patches, d_model).to(device)
-    x_out = attention(x, False, -1, -1)
+    x_out = attention(x, False, False, -1, -1)
     return x_out
 
 if __name__ == "__main__":
