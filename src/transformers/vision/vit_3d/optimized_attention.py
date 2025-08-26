@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch.amp import autocast
 
 from src.rms_norm import RMSNorm
-from utils.attention_utils import extend_kv_heads, setup_projections
+from utils.attention_utils import extend_kv_heads, setup_projections, apply_qk_norm
 from src.transformers.vision.vit_3d.rope_3d import RoPE3D
 
 class SpatioTemporalAttention(nn.Module):
@@ -352,6 +352,7 @@ class SpatioTemporalAttention(nn.Module):
         x: torch.Tensor,
         use_mqa: bool,
         grid_shape: Tuple[int, int, int],
+        use_qk_norm: bool,
         window_size: Tuple[int, int],
         padding_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
@@ -361,6 +362,7 @@ class SpatioTemporalAttention(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, T, H*W, d_model].
                 In _setup_qkv() we internally reshape to [B*T, H*W, d_model].
             use_mqa (bool): Whether to use multi-query attention or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             grid_shape (Tuple[int, int, int]): T, H, W dims after padding, reshaping, and creating patches.
             window_size (Tuple[int, int]): Left and right windows for SWA.
             padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, N].
@@ -368,10 +370,16 @@ class SpatioTemporalAttention(nn.Module):
         Returns:
             torch.Tensor: Output for the spatial attention layer of shape [B*T, H*W, d_model].
         """
-        q, k, v = self._setup_qkv(x, use_mqa, grid_shape, attn_mode="spatial")
+        q, k, v = self._setup_qkv(
+            x, 
+            use_mqa=use_mqa, 
+            use_qk_norm=use_qk_norm, 
+            grid_shape=grid_shape, 
+            attn_mode="spatial"
+        )
         # Get attention output, spatial
         spatial_out = self._optimized_attention(
-            x=x,
+            x,
             query=q, 
             key=k, 
             value=v,
@@ -386,6 +394,7 @@ class SpatioTemporalAttention(nn.Module):
         self,
         x: torch.Tensor,
         use_mqa: bool,
+        use_qk_norm: bool,
         grid_shape: Tuple[int, int, int],
         window_size: Tuple[int, int],
         padding_mask: Optional[torch.Tensor] = None
@@ -400,10 +409,16 @@ class SpatioTemporalAttention(nn.Module):
             window_size (Tuple[int, int]): Left and right windows for SWA.
             padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, N].
         """
-        q, k, v = self._setup_qkv(x, use_mqa, grid_shape, attn_mode="temporal")
+        q, k, v = self._setup_qkv(
+            x, 
+            use_mqa=use_mqa,
+            use_qk_norm=use_qk_norm,
+            grid_shape=grid_shape, 
+            attn_mode="temporal"
+        )
         # Get attention output, temporal
         temporal_out = self._optimized_attention(
-            x=x,
+            x,
             query=q,
             key=k,
             value=v,
@@ -418,8 +433,9 @@ class SpatioTemporalAttention(nn.Module):
         self,
         x: torch.Tensor,
         use_mqa: bool,
+        use_qk_norm: bool,
         grid_shape: Tuple[int, int, int],
-        attn_mode: Literal["spatial", "temporal"]
+        attn_mode: Literal["spatial", "temporal"],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Set up query, key, and value tensors based on spatial or temporal attention.
         
@@ -566,6 +582,10 @@ class SpatioTemporalAttention(nn.Module):
                 v.shape == (B*num_spatial_patches, T, self.query_groups, self.head_dim)
             ), f"v must have shape of {(B*num_spatial_patches, T, self.query_groups, self.head_dim)}, got {v.shape}"
 
+        # Apply QK normalization
+        if use_qk_norm:
+            q, k = apply_qk_norm(query=q, key=k)
+
         # Apply RoPE to qk tensors, same shapes from earlier
         q = self.rope(q, grid_shape, attn_mode)
         k = self.rope(k, grid_shape, attn_mode)
@@ -584,6 +604,14 @@ class SpatioTemporalAttention(nn.Module):
             use_mqa=use_mqa
         )
 
+        assert (
+            k.size(2) == v.size(2) == self.num_heads or
+            k.size(2) == v.size(2) == 1
+        ), (
+            f"expected k.size(2) and v.size(2) == 1 or {self.num_heads}, "
+            f"got {k.size(2)}, {v.size(2)}, respectively."
+        )
+
         return q, k, v
 
     def forward(
@@ -591,6 +619,7 @@ class SpatioTemporalAttention(nn.Module):
         x: torch.Tensor,
         grid_size: Tuple[int, int, int],
         use_mqa: bool,
+        use_qk_norm: bool,
         window_size: Optional[Tuple[int, int]] = None,
         padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -600,6 +629,7 @@ class SpatioTemporalAttention(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, T, H*W, d_model].
             grid_size (Tuple[int, int, int]): Grid size parameter for RoPE.
             use_mqa (bool): Whether to use multi-query attention or not.
+            use_qk_norm (bool): Whether to us QK norm or not.
             window_size (Tuple[int, int]): Window size for SWA.
             padding_mask (Optional[torch.Tensor]): Padding mask of shape [B, N].
 
@@ -607,26 +637,35 @@ class SpatioTemporalAttention(nn.Module):
             torch.Tensor: Output tensor of shape [B, T, H*W, d_model].
         """
         with autocast(device_type=device.type, dtype=dtype):
+            # [B*grid_T, H*W, d_model]
             spatial_out = self._spatial_attention(
-                x=x,
+                x,
                 use_mqa=use_mqa,
+                use_qk_norm=use_qk_norm,
                 grid_shape=grid_size,
                 window_size=window_size,
                 padding_mask=padding_mask
-            ) # [B*grid_T, H*W, d_model]
+            )
+
+            # [B, grid_T, H*W, d_model]
             spatial_out = spatial_out.view(
                 x.size(0), grid_size[0], -1, self.d_model
-            ) # [B, grid_T, H*W, d_model]
+            )
+
+            # [B*H*W, grid_T, d_model]
             temporal_out = self._temporal_attention(
-                x=spatial_out,
+                spatial_out,
                 use_mqa=use_mqa,
+                use_qk_norm=use_qk_norm,
                 grid_shape=grid_size,
                 window_size=window_size,
                 padding_mask=padding_mask
-            ) # [B*H*W, grid_T, d_model]
+            )
+
+            # [B, T, H*W, d_model]
             spatio_temporal_out = temporal_out.view(
                 x.size(0), grid_size[0], -1, self.d_model
-            ) # [B, T, H*W, d_model]
+            )
 
             return self.w_o(spatio_temporal_out)
         
@@ -663,7 +702,7 @@ class SpatioTemporalAttentionBlock(nn.Module):
             patch_size=patch_size
         )
         self.rms_norm = RMSNorm(
-            d_model, eps
+            d_model=d_model, eps=eps
         )
         self.dropout = nn.Dropout(dropout)
 
@@ -672,6 +711,7 @@ class SpatioTemporalAttentionBlock(nn.Module):
         x: torch.Tensor,
         grid_size: Tuple[int, int, int],
         use_mqa: bool,
+        use_qk_norm: bool,
         window_size: Tuple[int, int],
         padding_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
@@ -681,6 +721,7 @@ class SpatioTemporalAttentionBlock(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, T, H*W, d_model].
             grid_size (Tuple[int, int, int]): Tuple containing T, H, W grids.
             use_mqa (bool): Whether to use multi-query attention or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             window_size (Tuple[int, int]): Left and right windows for SWA.
             padding_mask (Optional[torch.Tensor]): Padding tensor with shape [B, T*H*W]
 
@@ -693,6 +734,7 @@ class SpatioTemporalAttentionBlock(nn.Module):
                     self.rms_norm(x),
                     grid_size=grid_size,
                     use_mqa=use_mqa,
+                    use_qk_norm=use_qk_norm,
                     window_size=window_size,
                     padding_mask=padding_mask
                 )
@@ -748,6 +790,7 @@ def test_attention_block(use_pad: bool):
         x=x,
         grid_size=grid_size,
         use_mqa=False,
+        use_qk_norm=True,
         window_size=(-1, -1),
         padding_mask=padding_mask
     )
