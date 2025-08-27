@@ -1,6 +1,5 @@
 from configs.setup_env import device, dtype
 
-import math
 from typing import Optional
 
 import torch
@@ -11,7 +10,7 @@ from torch.utils.checkpoint import checkpoint
 from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
 from src.autoregressive_image_gen.text_encoder.encoder_attention import AttentionBlock
-from configs.autoregressive_image_gen.text_encoder.model_args.model_args_xsmall import ModelArgs
+from configs.autoregressive_image_gen.autoregressive_transformer.model_args.model_args_xsmall import ModelArgs
 
 class TransformerBlock(nn.Module):
     """  
