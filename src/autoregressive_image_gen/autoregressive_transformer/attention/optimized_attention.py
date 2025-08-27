@@ -31,7 +31,6 @@ class CausalSelfAttention(nn.Module):
         use_fused_proj (bool): Whether to use qkv or seperate projections.
         use_window_attn (bool): Whether to use windowed attention or not.
         use_ntk_rope (bool): Whether to use NTK RoPE or classic RoPE.
-        max_position_embeddings (Optional[int]): Max sequence length to train classic RoPE on.
         ntk_scale_factor (Optional[float]): Scaling factor for NTK RoPE.
     """
     def __init__(
@@ -45,7 +44,6 @@ class CausalSelfAttention(nn.Module):
         use_fused_proj: bool,
         use_windowed_attn: bool,
         use_ntk_rope: bool,
-        max_position_embeddings: Optional[int] = None,
         ntk_scale_factor: Optional[float] = None
     ):
         super().__init__()
@@ -61,9 +59,7 @@ class CausalSelfAttention(nn.Module):
         
         if use_ntk_rope:
             assert ntk_scale_factor is not None, "Must be given scale factor for NTK RoPE"
-            max_position_embeddings = None
         else:
-            assert max_position_embeddings is not None, "Must be given max positional embddings if no NTK RoPE"
             ntk_scale_factor = None
 
         self.d_model = d_model
@@ -101,8 +97,8 @@ class CausalSelfAttention(nn.Module):
         self.ntk_rope = NTKRoPE2D(
             head_dim=self.head_dim,
             rope_theta=rope_theta,
+            use_ntk_rope=use_ntk_rope,
             ntk_scale_factor=ntk_scale_factor,
-            max_position_embeddings=max_position_embeddings
         )
 
     def _optimized_attention(
@@ -501,8 +497,8 @@ class CausalSelfAttention(nn.Module):
             q, k = apply_qk_norm(query=q, key=k)
 
         # Apply NTKRoPE2D
-        # q = self.ntk_rope(q)
-        # k = self.ntk_rope(k)
+        q = self.ntk_rope(q)
+        k = self.ntk_rope(k)
 
         # Extend kv heads
         k = extend_kv_heads(
@@ -598,7 +594,6 @@ class CausalSelfAttentionBlock(nn.Module):
         use_ntk_rope (bool): Whether to use NTK RoPE or classic RoPE.
         dropout (float): Dropout probability used for regularization.
         eps (float): Small value to maintain numerical stability in RMSNorm.
-        max_position_embeddings (Optional[int]): Max sequence length to train classic RoPE on.
         ntk_scale_factor (Optional[float]): Scaling factor for NTK RoPE.
     """
     def __init__(
@@ -614,7 +609,6 @@ class CausalSelfAttentionBlock(nn.Module):
         use_ntk_rope: bool,
         dropout: float,
         eps: float,
-        max_position_embeddings: Optional[int] = None,
         ntk_scale_factor: Optional[float] = None
     ):
         super().__init__()
@@ -629,7 +623,6 @@ class CausalSelfAttentionBlock(nn.Module):
             use_fused_proj=use_fused_proj,
             use_windowed_attn=use_windowed_attn,
             use_ntk_rope=use_ntk_rope,
-            max_position_embeddings=max_position_embeddings,
             ntk_scale_factor=ntk_scale_factor
         )
         self.rms_norm = RMSNorm(d_model=d_model, eps=eps)
@@ -686,7 +679,7 @@ def test_attention():
     attention = CausalSelfAttentionBlock(
         d_model, num_heads, query_groups, rope_theta, softmax_scale, 
         use_proj_bias=False, use_fused_proj=True, use_windowed_attn=False, 
-        use_ntk_rope=True, max_position_embeddings=2048, eps=eps, dropout=dropout,
+        use_ntk_rope=True, eps=eps, dropout=dropout,
         ntk_scale_factor=0.5,
     ).to(device)
     kv_cache = KVCache(

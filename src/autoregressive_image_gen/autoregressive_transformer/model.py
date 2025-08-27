@@ -30,7 +30,6 @@ class AutoregressiveTransformerBlock(nn.Module):
         dropout (float): Dropout probability for regularization.
         eps (float): Epsilon value to maintain numerical stability in RMSNorm.
         d_ffn (int): Dimensionality of FFN.
-        max_position_embeddings (Optional[int]): Max sequence length to train RoPE on.
         ntk_scale_factor: (Optional[float]): Scale factor for NTK RoPE.
     """
     def __init__(
@@ -47,7 +46,6 @@ class AutoregressiveTransformerBlock(nn.Module):
         dropout: float,
         eps: float,
         d_ffn: int,
-        max_position_embeddings: Optional[int] = None,
         ntk_scale_factor: Optional[float] =  None,
     ):
         super().__init__()
@@ -64,7 +62,6 @@ class AutoregressiveTransformerBlock(nn.Module):
             use_ntk_rope=use_ntk_rope,
             dropout=dropout,
             eps=eps,
-            max_position_embeddings=max_position_embeddings,
             ntk_scale_factor=ntk_scale_factor
         )
         self.cross_attention_block = CrossAttentionBlock(
@@ -172,7 +169,6 @@ class AutoregressiveImageTransformer(nn.Module):
                 dropout=model_args.dropout,
                 eps=model_args.rms_norm_eps,
                 d_ffn=model_args.d_ffn,
-                max_position_embeddings=model_args.max_position_embeddings,
                 ntk_scale_factor=model_args.ntk_scale_factor
             ).to(device) for _ in range(model_args.num_layers)
         ])
@@ -288,7 +284,7 @@ def test_transformer_block():
     block = AutoregressiveTransformerBlock(
         d_model, num_heads, query_groups, rope_theta, softmax_scale,
         use_proj_bias, use_fused_proj, use_windowed_attn, use_ntk_rope,
-        dropout, eps, d_ffn, max_position_embeddings, ntk_scale_factor
+        dropout, eps, d_ffn, ntk_scale_factor
     ).to(device)
     kv_cache = KVCache(
         max_batch_size=32,
@@ -328,7 +324,7 @@ def test_transformer_block():
 def test_model_forward():
     model_args = ModelArgs()
     model = AutoregressiveImageTransformer(model_args).to(device)
-    B, H, W, d_model = 1, 6, 12, model_args.d_model
+    B, H, W, d_model = 1, 12, 12, model_args.d_model
     T_q = H*W
     T_k = 4
     x = torch.randn(B, T_q, d_model).to(device)
@@ -350,5 +346,5 @@ def test_model_forward():
 
 if __name__ == "__main__":
     x = test_model_forward()
-    # [1, 72*144, 512]
+    # [1, 72, 512]
     print(x.shape)
