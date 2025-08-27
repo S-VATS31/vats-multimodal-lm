@@ -149,7 +149,7 @@ class CrossAttention(nn.Module):
             attn_out
             .transpose(1, 2)
             .contiguous()
-            .view(query.size(0), query.size(2), -1)
+            .view(query.size(0), query.size(2), self.d_model)
         )
 
         assert (

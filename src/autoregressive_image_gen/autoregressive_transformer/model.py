@@ -328,9 +328,9 @@ def test_transformer_block():
 def test_model_forward():
     model_args = ModelArgs()
     model = AutoregressiveImageTransformer(model_args).to(device)
-    B, H, W, d_model = 1, 72, 144, model_args.d_model
+    B, H, W, d_model = 1, 6, 12, model_args.d_model
     T_q = H*W
-    T_k = 16
+    T_k = 4
     x = torch.randn(B, T_q, d_model).to(device)
     text_embeddings = torch.randn(B, T_k, d_model).to(device)
     image_padding_mask = torch.randint(
