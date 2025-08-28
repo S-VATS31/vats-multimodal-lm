@@ -34,21 +34,6 @@ class ModelArgsAssertions:
             raise ValueError(
                 "must be given ntk_scale_factor for NTK RoPE."
             )
-        
-        if (
-            model_args.use_causal 
-            and model_args.use_windowed_attn 
-            and model_args.right_window != 0
-        ):
-            raise ValueError(
-                f"If using causal + windowed attention, right window must be 0, "
-                f"got {model_args.right_window}"
-            )
-        
-        if not model_args.left_window > 0:
-            raise ValueError(
-                f"left_window must be > 0, got {model_args.left_window}"
-            )
 
 class PostInitMixin:
     """Post initialization interface."""
