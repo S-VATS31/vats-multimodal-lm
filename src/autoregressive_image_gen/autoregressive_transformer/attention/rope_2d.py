@@ -7,12 +7,6 @@ import torch
 import torch.nn as nn
 from torch.amp import autocast
 
-# TODO: ADD TARGET SIZE FOR IMAGE GEN MODEL ARGS
-#
-# SQUARE IMAGE GEN:
-# target_size: int = H/W size
-# USING INT INSTEAD OF TUPLE TO GENERATE SQUARE IMAGES
-
 class NTKRoPE2D(nn.Module):
     """2D NTK RoPE layer for robust positional embeddings.
     
