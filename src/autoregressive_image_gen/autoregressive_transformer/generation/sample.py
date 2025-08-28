@@ -52,7 +52,7 @@ class ImageGenerationSampler:
         Returns:
             torch.Tensor: Output tensor with top-p sampling applied.
         """
-        pass
+        return logits
 
     @staticmethod
     def _greedy_sampling(logits: torch.Tensor) -> torch.LongTensor:
@@ -99,3 +99,40 @@ class ImageGenerationSampler:
         next_token = probs.multinomial(num_samples=1) # [B, V]
 
         return next_token
+
+def main():
+    logits = torch.tensor([[1.0, 2.0, 3.0, 0.5]])
+    print("Logits:", logits)
+
+    # Temperature sampling
+    temp_scaled = ImageGenerationSampler._temp_sampling(logits, temperature=2.0)
+    print("Temperature scaled:", temp_scaled)
+
+    # Top-k sampling
+    top_k_masked = ImageGenerationSampler._top_k_sampling(logits, top_k=2)
+    print("Top-k masked:", top_k_masked)
+
+    # Greedy sampling
+    greedy = ImageGenerationSampler._greedy_sampling(logits)
+    print("Greedy sampling token:", greedy)
+
+    # Full sample with sampling enabled
+    sampled = ImageGenerationSampler.sample_next_token(
+        logits,
+        use_sampling=True,
+        temperature=1.0,
+        top_k=2,
+        top_p=1.0,
+    )
+    print("Sampled token (use_sampling=True):", sampled)
+
+    # Full sample with greedy decoding
+    greedy_full = ImageGenerationSampler.sample_next_token(
+        logits,
+        use_sampling=False
+    )
+    print("Sampled token (use_sampling=False):", greedy_full)
+
+
+if __name__ == "__main__":
+    main()
