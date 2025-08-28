@@ -20,8 +20,8 @@ class ModelArgs(PostInitMixin):
     rope_theta: float = 10000.0
     use_ntk_rope: bool = True
     ntk_scale_factor: float = 0.7
-    left_window: int = -1
-    right_window: int = -1
+    left_window: int = 512
+    right_window: int = 0
     rms_norm_eps: float = 1e-12
     vocab_size: int = 65536
     max_position_embeddings: int = 2048
