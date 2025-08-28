@@ -127,7 +127,11 @@ class TransformerTextEncoder(nn.Module):
         self.apply(self._init_weights)
 
     def _init_weights(self, module) -> None:
-        """Weight initialization for a text encoder used in image generation."""
+        """Weight initialization for a text encoder used in image generation.
+        
+        Args:
+            module: Module to be initialized.
+        """
         if isinstance(module, nn.Linear):
             # Xavier uniform initialization
             nn.init.xavier_uniform_(module.weight)

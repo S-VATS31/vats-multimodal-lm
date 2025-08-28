@@ -10,7 +10,7 @@ from torch.utils.checkpoint import checkpoint
 from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
 from src.optimized_attention import KVCache
-from configs.autoregressive_image_gen.autoregressive_transformer.model_args.model_args_medium import ModelArgs
+from configs.autoregressive_image_gen.autoregressive_transformer.model_args.model_args_xlarge import ModelArgs
 from src.autoregressive_image_gen.autoregressive_transformer.attention.cross_attention import CrossAttentionBlock
 from src.autoregressive_image_gen.autoregressive_transformer.attention.optimized_attention import CausalSelfAttentionBlock
 
@@ -187,6 +187,9 @@ class AutoregressiveImageTransformer(nn.Module):
         self.rms_norm = RMSNorm(
             d_model=model_args.d_model, eps=model_args.rms_norm_eps
         ).to(device)
+
+        # TODO: work on weight initialization
+        # TODO: add weight initialization based on module named and best init val
         
         # Initialize weights
         #self.apply(self._init_weights)
@@ -342,9 +345,10 @@ def test_model_forward():
         causal_padding_mask=image_padding_mask,
         cross_padding_mask=text_padding_mask
     )
-    return x_out
+    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return x_out, params
 
 if __name__ == "__main__":
-    x = test_model_forward()
-    # [1, 72, 512]
-    print(x.shape)
+    x, params = test_model_forward()
+    print(x.shape) # [1, 144, d_model]
+    print(f"{params:,}")

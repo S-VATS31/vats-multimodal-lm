@@ -4,18 +4,16 @@ import math
 
 from configs.autoregressive_image_gen.autoregressive_transformer.model_args.post_init import PostInitMixin
 
-# TODO: update and calculate parameters
-
 @dataclass
 class ModelArgs(PostInitMixin):
-    """Small configuration of model arguments."""
-    d_model: int = 512
-    num_heads: int = 8
+    """Extra large configuration of model arguments 2.3 billion parameters."""
+    d_model: int = 2304
+    num_heads: int = 32
     query_groups: int = 4
     max_batch_size: int = 32
     softmax_scale: Optional[float] = None
-    d_ffn: int = 2048
-    num_layers: int = 12
+    d_ffn: int = 9216
+    num_layers: int = 24
     dropout: float = 0.2
     rope_theta: float = 10000.0
     use_ntk_rope: bool = True
