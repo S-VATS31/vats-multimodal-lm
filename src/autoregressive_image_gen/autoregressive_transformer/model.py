@@ -10,7 +10,7 @@ from torch.utils.checkpoint import checkpoint
 from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
 from src.optimized_attention import KVCache
-from configs.autoregressive_image_gen.autoregressive_transformer.model_args.model_args_large import ModelArgs
+from configs.autoregressive_image_gen.autoregressive_transformer.model_args.model_args_medium import ModelArgs
 from src.autoregressive_image_gen.autoregressive_transformer.attention.cross_attention import CrossAttentionBlock
 from src.autoregressive_image_gen.autoregressive_transformer.attention.optimized_attention import CausalSelfAttentionBlock
 
