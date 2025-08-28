@@ -7,6 +7,7 @@ from configs.autoregressive_image_gen.autoregressive_transformer.model_args.post
 @dataclass
 class ModelArgs(PostInitMixin):
     """Extra small configuration of model arguments 130 million parameters."""
+    target_size: int = 256
     d_model: int = 768
     num_heads: int = 32
     query_groups: int = 4
