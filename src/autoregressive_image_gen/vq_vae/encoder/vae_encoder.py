@@ -1,19 +1,19 @@
 from configs.setup_env import device, dtype
 
-from typing import Optional, Tuple, Literal
+from typing import Literal
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import autocast
 
-class Encoder(nn.Module):
+class VQVAEEncoder(nn.Module):
     """Encoder layer using a convolutional neural network (CNN).
     
     Args:
         C_in (int): Number of input channels to the CNN.
         d_model (int): Dimensionality of model embeddings.
-
+        activation_func (Literal["relu", "leaky_relu", "sigmoid"]): Non-linear activation.
     """
     def __init__(
         self, 
@@ -102,7 +102,7 @@ class Encoder(nn.Module):
         
 def test_encoder():
     C_in, d_model = 3, 512
-    encoder = Encoder(
+    encoder = VQVAEEncoder(
         C_in=C_in, d_model=d_model, activation_func="sigmoid"
     ).to(device)
     B, H, W = 1, 144, 144
