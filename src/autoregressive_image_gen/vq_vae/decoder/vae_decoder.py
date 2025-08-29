@@ -61,7 +61,7 @@ class VQVAEDecoder(nn.Module):
         if activation_func == "relu":
             self.activation = nn.ReLU()
         elif activation_func == "leaky_relu":
-            self.activation == nn.LeakyReLU()
+            self.activation = nn.LeakyReLU()
         elif activation_func == "sigmoid":
             self.activation = nn.Sigmoid()
         else:
