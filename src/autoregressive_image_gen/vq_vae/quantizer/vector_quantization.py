@@ -94,7 +94,11 @@ class VectorQuantizer(nn.Module):
             # Get straight through estimator for backprop
             z_q = z + (z_q - z).detach()
 
-            return z_q, total_loss, encoding_indices.view(z.size(0), -1)
+            return (
+                z_q.view(B, -1, self.d_model), 
+                total_loss, 
+                encoding_indices.view(z.size(0), -1)
+            )
 
 def test_vq():
     num_embeddings, d_model, commitment_beta = 256, 512, 0.7
