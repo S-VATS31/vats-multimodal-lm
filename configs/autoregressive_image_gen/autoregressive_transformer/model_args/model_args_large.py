@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Literal
 from dataclasses import dataclass
 import math
 
@@ -31,6 +31,10 @@ class ModelArgs(PostInitMixin):
     use_qk_norm: bool = True
     use_causal: bool = True
     use_windowed_attn: bool = True
+    vae_encoder_activation: Literal["relu", "leaky_relu", "sigmoid"] = "relu"
+    num_embeddings: int = 256
+    commitment_beta: float = 0.7
+    C_in_out: int = 3
 
     def __post_init__(self):
         """Post-init to calculate softmax scale dynamically."""
