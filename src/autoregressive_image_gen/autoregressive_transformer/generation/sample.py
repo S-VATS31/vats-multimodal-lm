@@ -133,6 +133,5 @@ def main():
     )
     print("Sampled token (use_sampling=False):", greedy_full)
 
-
 if __name__ == "__main__":
     main()
