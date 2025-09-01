@@ -100,26 +100,3 @@ def apply_qk_norm(
         F.normalize(query, p=2, dim=-1),
         F.normalize(key, p=2, dim=-1)
     )
-
-# ---------------------------- TESTING ---------------------------- # 
-
-torch.manual_seed(42)
-
-B, T, num_heads, d_model = 2, 16, 32, 512
-head_dim = d_model // num_heads
-q = torch.randn(B, T, num_heads, head_dim)
-k = torch.randn(B, T, num_heads, head_dim)
-
-def _test_qk_norm():
-    query, key = apply_qk_norm(q, k)
-    return query, key
-
-def _test_norm(input: torch.Tensor):
-    return input / torch.sqrt(torch.sum(input ** 2, dim=-1, keepdim=True))
-
-if __name__ == "__main__":
-    q_norm, k_norm = _test_qk_norm()
-    q_calculated_norm = _test_norm(q)
-    print(q[0, 0, 0, 0])
-    print(q_norm[0, 0, 0, 0])
-    print(q_calculated_norm[0, 0, 0, 0])
