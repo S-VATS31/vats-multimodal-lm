@@ -19,7 +19,7 @@ from utils.attention_utils import extend_kv_heads, setup_projections, apply_qk_n
 from src.autoregressive_video_gen.autoregressive_transformer.attention.rope3d import NTKRoPE3D
 
 
-class CausalSpatioTemporalFactorizedAttention(nn.Module):
+class CausalFactorizedAttention(nn.Module):
     """Causal attention layer utilizing factorized attention.
     
     Args:
@@ -440,6 +440,7 @@ class CausalSpatioTemporalFactorizedAttention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape [B, T, H*W, d_model].
             use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
             attn_mode (Literal["spatial", "temporal"]): Set up QKV tensors.
 
         Returns:
@@ -663,6 +664,10 @@ class CausalSpatioTemporalFactorizedAttention(nn.Module):
                     - torch.Tensor: Temporal value tensor.
         """
         with autocast(device_type=device.type, dtype=dtype):
+            # Set right window to 0 for causal gen
+            if use_causal:
+                right_window = 0
+            
             # Global attention setup
             if not self.use_windowed_attention:
                 left_window, right_window = -1, -1
@@ -725,7 +730,7 @@ class CausalSpatioTemporalFactorizedAttention(nn.Module):
             return self.o_proj(spatio_temporal_out)
 
 
-class CausalSpatioTemporalFactorizedAttentionBlock(nn.Module):
+class CausalFactorizedAttentionBlock(nn.Module):
     """Attention block applying attention, normalization, residuals and dropout.
     
     Args:
@@ -759,7 +764,7 @@ class CausalSpatioTemporalFactorizedAttentionBlock(nn.Module):
     ):
         super().__init__()
 
-        self.attention = CausalSpatioTemporalFactorizedAttention(
+        self.attention = CausalFactorizedAttention(
             d_model=d_model,
             num_heads=num_heads,
             query_groups=query_groups,
@@ -827,7 +832,7 @@ def test_attention():
     softmax_scale = 1 / (d_model // num_heads) ** 0.5
     use_proj_bias, use_fused_proj, use_windowed_attn = False, True, True
     use_ntk_rope, ntk_scale_factor = True, 0.7
-    attention = CausalSpatioTemporalFactorizedAttention(
+    attention = CausalFactorizedAttention(
         d_model, num_heads, query_groups,rope_theta, 
         softmax_scale, use_proj_bias,use_fused_proj, 
         use_windowed_attn, use_ntk_rope, ntk_scale_factor
@@ -867,7 +872,7 @@ def test_attention_block():
     use_proj_bias, use_fused_proj, use_windowed_attn = False, True, True
     use_ntk_rope, ntk_scale_factor = True, 0.7
     eps, dropout = 1e-12, 0.15
-    attention = CausalSpatioTemporalFactorizedAttentionBlock(
+    attention = CausalFactorizedAttentionBlock(
         d_model, num_heads, query_groups,rope_theta, 
         softmax_scale, use_proj_bias,use_fused_proj, 
         use_windowed_attn, use_ntk_rope, eps, dropout, ntk_scale_factor
