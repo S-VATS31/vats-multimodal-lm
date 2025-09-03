@@ -204,8 +204,6 @@ class KVCache:
         Raises:
             ValueError: If batch_size exceeds max_batch_size.
         """
-        if batch_size > self.max_batch_size:
-            raise ValueError(f"Batch size {batch_size} exceeds maximum {self.max_batch_size}")
 
         self.batch_size = batch_size
         self.current_seq_len = 0
