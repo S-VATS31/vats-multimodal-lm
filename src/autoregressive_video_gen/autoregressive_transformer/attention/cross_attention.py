@@ -20,6 +20,8 @@ from utils.attention_utils import (
     apply_qk_norm
 )
 
+# TODO: implement or remove optimized attention
+
 class FactorizedCrossAttention(nn.Module):
     """Factorized cross attention layer for video generation.
     
