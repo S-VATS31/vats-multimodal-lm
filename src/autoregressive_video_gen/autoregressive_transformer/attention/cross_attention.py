@@ -6,7 +6,7 @@ from configs.setup_env import (
     flash_attn_varlen_qkvpacked_func
 )
 
-from typing import Optional, Tuple, Literal
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -21,6 +21,15 @@ from utils.attention_utils import (
 )
 
 class FactorizedCrossAttention(nn.Module):
+    """Factorized cross attention layer for video generation.
+    
+    Args:
+        d_model (int): Dimensionality of model embeddings.
+        num_heads (int): Number of attention heads for queries.
+        query_groups (int): Number of query groups for GQA.
+        softmax_scale (float): Scale for attention scores.
+        use_proj_bias (bool): Whether to use projection bias or not.
+    """
     def __init__(
         self,
         d_model: int,
@@ -468,14 +477,71 @@ class FactorizedCrossAttention(nn.Module):
             return self.o_proj(spatio_temporal_out)
 
 class FactorizedCrossAttentionBlock(nn.Module):
-    def __init__(self):
+    """Factorized cross attention layer applying attn, normalizagion, dropout, and residuals.
+    
+    Args:
+        d_model (int): Dimensionality of model embeddings.
+        num_heads (int): Number of attention heads for queries.
+        query_groups (int): Number of query groups for GQA.
+        softmax_scale (float): Scale for attention scores.
+        use_proj_bias (bool): Whether to use projection bias or not.
+        eps (float): Small epsilon value to maintain numerical stability in RMSNorm.
+        dropout (float): Dropout probability for regularization.
+    """
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        query_groups: int,
+        softmax_scale: float,
+        use_proj_bias: bool,
+        eps: float,
+        dropout: float
+    ):
         super().__init__()
 
-        pass
+        self.cross_attention = FactorizedCrossAttention(
+            d_model=d_model,
+            num_heads=num_heads,
+            query_groups=query_groups,
+            softmax_scale=softmax_scale,
+            use_proj_bias=use_proj_bias
+        )
+        self.rms_norm = RMSNorm(
+            d_model=d_model, eps=eps
+        )
+        self.dropout = nn.Dropout(p=dropout)
 
-    def forward(self) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        text_embeddings: torch.Tensor,
+        use_mqa: bool,
+        use_qk_norm: bool,
+        padding_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Forward pass of factorized cross attention block.
+        
+        Args:
+            x (torch.Tensor): Input image tensor of shape [B, T_frames, H*W, d_model].
+            text_embeddings (torch.Tensor): Input text tensor of shape [B, T_tokens, d_model].
+            use_mqa (bool): Whether to use MQA or not.
+            use_qk_norm (bool): Whether to use QK normalization or not.
+            padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T_tokens].
+
+        Returns:
+            torch.Tensor: Output tensor of shape [B, T, H*W, d_model].
+        """
         with autocast(device_type=device.type, dtype=dtype):
-            pass
+            return x + self.dropout(
+                self.cross_attention(
+                    self.rms_norm(x),
+                    text_embeddings=text_embeddings,
+                    use_mqa=use_mqa,
+                    use_qk_norm=use_qk_norm,
+                    padding_mask=padding_mask
+                )
+            )
 
 
 def test_spatial_qkv():
@@ -529,9 +595,31 @@ def test_attention():
     )
     return x_out
 
+def test_attention_block():
+    d_model, num_heads, query_groups = 512, 32, 8
+    softmax_scale = (d_model // num_heads) ** 0.5
+    eps, dropout = 1e-12, 0.15
+    cross_attn = FactorizedCrossAttentionBlock(
+        d_model, num_heads, query_groups,
+        softmax_scale, use_proj_bias=False, 
+        eps=eps, dropout=dropout
+    ).to(device)
+    B, T_frames, H, W = 1, 8, 32, 32
+    T_tokens = 16
+    x = torch.randn(B, T_frames, H*W, d_model).to(device)
+    text_embeddings = torch.randn(B, T_tokens, d_model).to(device)
+    padding_mask = torch.randint(
+        0, 2, (B, T_tokens), dtype=torch.bool
+    )
+    x_out = cross_attn(
+        x, text_embeddings, False, True, padding_mask
+    )
+    return x_out
 
 if __name__ == "__main__":
-    x = test_attention()
+    # [B, T_frames, H*W, d_model]
+    # [1, 8, 1024, 512]
+    x = test_attention_block()
     print(x.shape)
 
 # if __name__ == "__main__":
