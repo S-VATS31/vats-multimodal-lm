@@ -20,8 +20,6 @@ from utils.attention_utils import (
     apply_qk_norm
 )
 
-# TODO: implement or remove optimized attention
-
 class FactorizedCrossAttention(nn.Module):
     """Factorized cross attention layer for video generation.
     
@@ -118,7 +116,6 @@ class FactorizedCrossAttention(nn.Module):
         Args:
             torch.Tensor: Attention output of shape [B, T_frames, H*W, d_model].
         """
-        
         # Handle padding mask
         if padding_mask is not None:
             assert (
