@@ -47,7 +47,9 @@ class VQVAE(nn.Module):
         
         Returns:
             Tuple:
-                - 
+                - torch.Tensor: Output tensor (reconstruction of input tensor).
+                - torch.Tensor: Total loss.
+                - torch.Tensor: Codebook indices.
         """
         with autocast(device_type=device.type, dtype=dtype):
             # [B, H*W, d_model]

@@ -1,9 +1,10 @@
-from typing import Optional, Literal
+from typing import Optional, Tuple, Literal
 from dataclasses import dataclass
 
 @dataclass
 class ModelArgs:
     """Large configuration of model arguments 1.2 billion parameters."""
+    patch_size: Tuple[int, int, int] = (2, 8, 8)
     max_frames: int = 30
     d_model: int = 1792
     num_heads: int = 32
