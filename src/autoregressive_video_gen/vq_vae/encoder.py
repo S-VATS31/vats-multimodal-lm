@@ -8,6 +8,13 @@ from torch.amp import autocast
 
 
 class Encoder3D(nn.Module):
+    """Encoder projecting and downsampling for 3D video generation.
+    
+    Args:
+        d_model (int): Dimensionality of model embeddings.
+        C_in (int): Number of input channels.
+        patch_size (Tuple[int, int, int]): T, H, W patch sizes.
+    """
     def __init__(
         self,
         d_model: int,
@@ -93,11 +100,11 @@ class Encoder3D(nn.Module):
             ), f"expected {self.d_model}, got {x.size(1)}"
 
             # Reshape to [B, T_frames, H, W, d_model]
-            x = x.permute(0, 2, -2, -1, 1).contiguous().view(B, new_T, -1, self.d_model)
+            x = x.permute(0, 2, -2, -1, 1).contiguous()
 
             assert (
-                x.shape == (B, new_T, new_H*new_W, self.d_model)
-            ), f"expeced {(B, new_T, new_H*new_W, self.d_model)}, got {x.shape}"
+                x.shape == (B, new_T, new_H, new_W, self.d_model)
+            ), f"expeced {(B, new_T, new_H, new_W, self.d_model)}, got {x.shape}"
 
             return x
         
