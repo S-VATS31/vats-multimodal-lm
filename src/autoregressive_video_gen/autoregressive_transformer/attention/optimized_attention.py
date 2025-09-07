@@ -222,8 +222,7 @@ class CausalFactorizedAttention(nn.Module):
                     # [B*T, 1, T_q, T_k]
                     causal_mask = (
                         causal_mask[None, None, :, :]
-                        .expand(B*T, 1, query.size(2), key.size(2)
-                        )
+                        .expand(B*T, 1, query.size(2), key.size(2))
                     )
                     assert (
                         causal_mask.shape == (B*T, 1, query.size(2), key.size(2))
@@ -545,7 +544,7 @@ class CausalFactorizedAttention(nn.Module):
                     q.shape == (B*T, num_spatial_patches, self.num_heads*self.head_dim)
                 ), f"expected {(B*T, num_spatial_patches, self.num_heads*self.head_dim)}, got {q.shape}"
                 assert (
-                    q.shape == v.shape == (B*num_spatial_patches, T, self.num_heads*self.head_dim)
+                    k.shape == v.shape == (B*num_spatial_patches, T, self.num_heads*self.head_dim)
                 ), (
                     f"expected {(B*num_spatial_patches, T, self.query_groups*self.head_dim)}"
                 )
@@ -593,8 +592,8 @@ class CausalFactorizedAttention(nn.Module):
             q, k = apply_qk_norm(query=q, key=k)
 
         # Apply NTKRoPE3D
-        q = self.ntk_rope3d(q)
-        k = self.ntk_rope3d(k)
+        # q = self.ntk_rope3d(q)
+        # k = self.ntk_rope3d(k)
 
         # Extend KV heads
         k = extend_kv_heads(

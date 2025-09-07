@@ -145,10 +145,20 @@ class AutoregressiveVideoTransformerBlock(nn.Module):
 
 
 class AutoregressiveVideoTransformer(nn.Module):
+    """Autoregressive transformer stacking blocks.
+    
+    Args:
+        model_args (ModelArgs): Dataclass containing model hyperparameters.
+    """
     def __init__(self, model_args: ModelArgs):
         super().__init__()
 
         self.model_args = model_args
+
+        # Set up embedding for VQVAE
+        self.embedding = nn.Embedding(
+            model_args.num_embeddings, model_args.d_model
+        ).to(device)
 
         # Set up dropout
         self.dropout = nn.Dropout(p=model_args.dropout).to(device)
@@ -208,7 +218,7 @@ class AutoregressiveVideoTransformer(nn.Module):
         """Forward pass of entire transformer.
         
         Args:
-            x (torch.Tensor): Input image tokens of shape [B, T_frames, H*W, d_model].
+            x (torch.Tensor): VQ-VAE encoding indices of shape [B, T_frames, H, W].
             text_embeddings (torch.Tensor): Input text tokens of shape [B, T_tokens, d_model].
             use_cache (bool): Whether to use KV caching or not.
             spatio_temporal_padding_mask (Optional[torch.Tensor]): Padding tensor of shape [B, T_frames*H*W].
@@ -226,13 +236,25 @@ class AutoregressiveVideoTransformer(nn.Module):
             text_padding_mask.dim() == 2
         ), f"expected 2 dims, got {text_padding_mask.dim()} dims"
         assert (
-            spatio_temoral_padding_mask.shape == (x.size(0), x.size(1)*x.size(2))
-        ), f"expected {(x.size(0), x.size(1)*x.size(2))}, got {spatio_temoral_padding_mask.shape}"
+            spatio_temoral_padding_mask.shape == (x.size(0), x.size(1)*x.size(2)*x.size(3))
+        ), f"expected {(x.size(0), x.size(1)*x.size(2)*x.size(3))}, got {spatio_temoral_padding_mask.shape}"
         assert (
-            text_padding_mask.shape == text_embeddings.shape[:-1]
-        ), f"expected {text_embeddings.shape[:-1]}, got {text_padding_mask.shape}"
+            text_padding_mask.shape == (text_embeddings.size(0), text_embeddings.size(1))
+        ), f"expected {(text_embeddings.size(0), text_embeddings.size(1))}, got {text_padding_mask.shape}"
 
-        x = self.dropout(x) # [B, T_frames, H*W, d_model]
+        # [B, T_frames, H*W, d_model]
+        x = self.dropout(self.embedding(x))
+        assert x.dim() == 5, f"expected 5 dims, got {x.dim()}"
+        assert (
+            x.size(-1) == self.model_args.d_model
+        ), f"expected {self.model_args.d_model}, got {x.size(-1)}"
+
+        B, T_frames, H, W, _ = x.shape # will be used for reshaping later
+
+        x = x.view(x.size(0), x.size(1), -1, x.size(-1))
+        assert (
+            x.shape == (B, T_frames, H*W, self.model_args.d_model)
+        ), f"expected {(B, T_frames, H*W, self.model_args.d_model)}, got {x.shape}"
 
         # Loop through layers
         for layer_idx, layer in enumerate(self.layers):
@@ -274,7 +296,7 @@ class AutoregressiveVideoTransformer(nn.Module):
         # Apply RMSNorm
         x = self.rms_norm(x)
 
-        return x # [B, T_frames, H*W, d_model]
+        return x.view(B, T_frames, H, W, -1)  # [B, T, H, W, d_model]
 
 def test_transformer_block():
     d_model, num_heads, query_groups, rope_theta = 512, 32, 8, 10000.0
@@ -325,11 +347,13 @@ def test_transformer_forward():
     model = AutoregressiveVideoTransformer(model_args).to(device)
     B, T_frames, H, W = 1, 15, 32, 32
     T_tokens = 16
-    x = torch.randn(B, T_frames, H*W, model_args.d_model).to(device)
+    x = torch.randint(
+        low=0, 
+        high=model_args.num_embeddings,
+        size=(B, T_frames, H, W),
+        device=device
+    )
     text_embeddings = torch.randn(B, T_tokens, model_args.d_model).to(device)
-    print(x.size(1))
-    print(x.size(2))
-    print(x.size(3))
     spatio_temporal_padding_mask = torch.randint(
         0, 2, (B, T_frames*H*W), dtype=torch.bool
     ).to(device)
@@ -347,10 +371,5 @@ def test_transformer_forward():
 
 
 if __name__ == "__main__":
-    x_out = test_transformer_forward()
-    # [1, 15, 1024, 1792]
-    print(x_out.shape)
-
-# if __name__ == "__main__":
-#     x_out = test_transformer_block()
-#     print(x_out.shape) # [1, 16, 32*32, 512]
+    x = test_transformer_forward()
+    print(x.shape)
