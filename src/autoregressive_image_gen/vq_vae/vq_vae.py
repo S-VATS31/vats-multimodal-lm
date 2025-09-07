@@ -52,18 +52,9 @@ class VQVAE(nn.Module):
                 - torch.Tensor: Codebook indices.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            # [B, H*W, d_model]
             z = self.encoder(x)
-
-            # z_q: [B*H*W, d_model]
-            # loss: scalar tensor
-            # encoding_indices: [B, H*W]
             z_q, loss, encoding_indices = self.quantizer(z)
-            
-            # Reconstruct image:
-            # x_reconstructed shape: [B, C_out, H, W]
             x_reconstructed = self.decoder(z_q)
-
             return x_reconstructed, loss, encoding_indices
 
 def main():
