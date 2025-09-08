@@ -296,3 +296,55 @@ class MoEBlock(nn.Module):
             moe_out, aux_loss = self.moe(self.rms_norm(x))
             return x + self.dropout(moe_out), aux_loss
         
+
+import unittest
+import torch
+from src.transformers.nlp.moe import MoEBlock
+
+class TestMoEBlock(unittest.TestCase):
+    def setUp(self):
+        self.batch_size = 4
+        self.seq_len = 8
+        self.d_model = 16
+        self.d_ffn = 32
+        self.num_experts = 3
+        self.top_k = 2
+        self.dropout = 0.0  # Disable dropout for deterministic test
+        self.eps = 1e-5
+
+        # Initialize MoEBlock
+        self.moe_block = MoEBlock(
+            d_model=self.d_model,
+            d_ffn=self.d_ffn,
+            dropout=self.dropout,
+            num_experts=self.num_experts,
+            top_k=self.top_k,
+            eps=self.eps
+        )
+        self.moe_block.train()  # Enable training to compute aux_loss
+
+        # Dummy input
+        self.x = torch.randn(self.batch_size, self.seq_len, self.d_model)
+
+    def test_forward_aux_loss(self):
+        out, aux_loss = self.moe_block(self.x)
+
+        # Check output shape
+        self.assertEqual(out.shape, (self.batch_size, self.seq_len, self.d_model))
+
+        # Check aux_loss is a scalar tensor
+        self.assertTrue(isinstance(aux_loss, torch.Tensor))
+        self.assertEqual(aux_loss.dim(), 0)
+
+        # Check aux_loss is non-negative
+        self.assertGreaterEqual(aux_loss.item(), 0.0)
+
+        print(aux_loss)
+
+        # Optionally: check forward pass is differentiable
+        out.sum().backward()
+        for name, param in self.moe_block.named_parameters():
+            self.assertIsNotNone(param.grad, f"Gradient missing for {name}")
+
+if __name__ == "__main__":
+    unittest.main()
