@@ -332,12 +332,12 @@ def test_model_forward():
     ).to(device)
     padding_mask = torch.randint(0, 2, (B, T), dtype=torch.bool).to(device)
     use_cache = True
-    logits = model(
+    logits, _, aux_loss = model(
         input_ids, padding_mask, use_cache
-    )[0]
-    return logits
+    )
+    return logits, aux_loss
 
 if __name__ == "__main__":
-    logits = test_model_forward()
+    logits, aux_loss = test_model_forward()
     print(logits.shape) # [4, 16, 65336]
     
