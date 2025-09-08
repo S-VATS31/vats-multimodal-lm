@@ -1,7 +1,6 @@
 from configs.setup_env import device, dtype
 
 import math
-import warnings
 from typing import Dict, List, Tuple, Optional
 
 import torch
@@ -169,7 +168,7 @@ class AutoregressiveTextTransformer(nn.Module):
         """Initializes model weights according to layer type.
         
         Args:
-            module: PyTorch module to be initialized.
+            module: Module to be initialized.
         """
         num_layers = self.model_args.num_layers
         init_std = 0.02
@@ -241,7 +240,6 @@ class AutoregressiveTextTransformer(nn.Module):
             ), f"input_ids must have 2 dimensions, got {input_ids.dim()}"
             # Ensure input_ids are int64 for nn.Embedding() layer
             if input_ids.dtype != torch.int64:
-                warnings.warn(f"got input_ids of {input_ids.dtype}, casting to int64")
                 input_ids = input_ids.to(torch.int64)
 
             # Ensure padding mask/input_ids are the same shape
@@ -296,7 +294,7 @@ class AutoregressiveTextTransformer(nn.Module):
                     )
                 else:
                     x, cache_out, aux_loss = layer(
-                        x=x,
+                        x,
                         left_window=self.model_args.left_window,
                         right_window=self.model_args.right_window,
                         causal=self.model_args.use_causal,
