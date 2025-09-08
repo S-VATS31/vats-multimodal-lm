@@ -1,6 +1,5 @@
 from configs.setup_env import device, dtype
 
-import warnings
 from typing import Tuple
 
 import torch
@@ -192,12 +191,6 @@ class MoELayer(nn.Module):
 
         # Get routers
         expert_weights, expert_indices, aux_loss = self.router(x)
-
-        # Check if aux_loss being used
-        if aux_loss.item() == 0.0:
-            warnings.warn(
-                "Auxiliary loss not being used. To use auxiliary loss set use_aux_loss to True."
-            )
 
         assert (
            expert_weights.shape == (B, T, self.top_k)

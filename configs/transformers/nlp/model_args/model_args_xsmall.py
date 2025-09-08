@@ -1,14 +1,14 @@
 import math
-from typing import Optional
 from dataclasses import dataclass
 
+from configs.transformers.nlp.model_args.post_init import PostInitMixin
+
 @dataclass
-class ModelArgs:
+class ModelArgs(PostInitMixin):
     """Extra small configuration of model arguments."""
     d_model: int = 256
     num_heads: int = 16
     query_groups: int = 2
-    softmax_scale: Optional[float] = None
     d_ffn: int = 1024
     num_layers: int = 8
     dropout: float = 0.1
@@ -28,11 +28,4 @@ class ModelArgs:
     use_cache: bool = False
     num_experts: int = 1
     top_k: int = 1
-
-    def __post_init__(self):
-        """Post initialization to set softmax scale dynamically."""
-        if self.softmax_scale is None:
-            self.softmax_scale = 1 / math.sqrt(self.d_model // self.num_heads)
-
-        # Call assertions
-        super().__post_init__()
+    softmax_scale: float = math.sqrt(256//16)
