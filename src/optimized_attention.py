@@ -513,10 +513,7 @@ class Attention(nn.Module):
                 cached_k, cached_v = kv_cache.get(layer_idx, kv_cache.current_seq_len)
                 k = torch.cat([cached_k, k], dim=1)
                 v = torch.cat([cached_v, v], dim=1)
-
-            # Update KVCache and increment sequence length
-            kv_cache.update(layer_idx, k, v)
-            kv_cache.current_seq_len = k.size(1)
+                kv_cache.update(layer_idx, k, v)
 
             # for causal LM, we want right window to be 0
             if causal:
@@ -584,7 +581,7 @@ class Attention(nn.Module):
                         qkv_packed.view(-1, self.num_heads, 3, self.head_dim)
                         .transpose(1, 2)
                         .contiguous()
-                        )[valid_tokens] # [B * T, 3, num_heads, head_dim]
+                    )[valid_tokens] # [B * T, 3, num_heads, head_dim]
                     
                     assert (
                         qkv_packed.shape == (B * T, 3, self.num_heads, self.head_dim)
@@ -853,5 +850,5 @@ def test_attention(use_pad: bool):
     return x_out, cache_out
 
 if __name__ == "__main__":
-    x, _ = test_attention(True)
+    x, _ = test_attention(False)
     print(x.shape)

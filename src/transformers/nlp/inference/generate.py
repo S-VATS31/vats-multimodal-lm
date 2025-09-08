@@ -282,8 +282,8 @@ class AutoregressiveTokenGenerator:
 
 def main():
     from transformers import AutoTokenizer
+    
     # Initialize model and generation arguments
-
     model_args = ModelArgs()
     generation_args = GenerationArgs()
 

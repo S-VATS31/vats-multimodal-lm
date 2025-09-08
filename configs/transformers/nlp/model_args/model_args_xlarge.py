@@ -2,8 +2,10 @@ import math
 from typing import Optional
 from dataclasses import dataclass
 
+from configs.transformers.nlp.model_args.post_init import PostInitMixin
+
 @dataclass
-class ModelArgs:
+class ModelArgs(PostInitMixin):
     """Extra large configuration of model arguments."""
     d_model: int = 5120
     num_heads: int = 40
