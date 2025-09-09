@@ -90,12 +90,12 @@ class CausalFactorizedAttention(nn.Module):
             )
 
         # Set up 3D RoPE
-        self.ntk_rope3d = NTKRoPE3D(
-            head_dim=self.head_dim,
-            rope_theta=rope_theta,
-            use_ntk_rope=use_ntk_rope,
-            ntk_scale_factor=ntk_scale_factor
-        )
+        # self.ntk_rope3d = NTKRoPE3D(
+        #     head_dim=self.head_dim,
+        #     rope_theta=rope_theta,
+        #     use_ntk_rope=use_ntk_rope,
+        #     ntk_scale_factor=ntk_scale_factor
+        # )
     
     def _update_temporal_kv(
         self,
@@ -456,13 +456,13 @@ class CausalFactorizedAttention(nn.Module):
         # Reshape x to [B*T, H*W, d_model] for spatial
         # Reshape x to [B*H*W, T, d_model] for temporal
         if attn_mode == "spatial":
-            x = x.view(-1, num_spatial_patches, self.d_model)
+            x = x.view(B*T, num_spatial_patches, self.d_model)
             assert (
                 x.shape == (B*T, num_spatial_patches, self.d_model)
             ), f"expected {(B*T, num_spatial_patches, self.d_model)}, got {x.shape}"
         elif attn_mode == "temporal":
             x = (
-                x.transpose(1, 2).contiguous().view(-1, T, self.d_model)
+                x.transpose(1, 2).contiguous().view(B*num_spatial_patches, T, self.d_model)
             )
             assert (
                 x.shape == (B*num_spatial_patches, T, self.d_model)
@@ -684,7 +684,7 @@ class CausalFactorizedAttention(nn.Module):
 
             # [B, T, H*W, d_model]
             spatial_out = spatial_out.view(
-                x.size(0), x.size(1), -1, self.d_model
+                x.size(0), x.size(1), x.size(2), self.d_model
             )
 
             # [B*H*W, T, d_model]
@@ -703,7 +703,9 @@ class CausalFactorizedAttention(nn.Module):
 
             # [B, T, H*W, d_model]
             spatio_temporal_out = (
-                temporal_out.view(x.size(0), x.size(1), -1, self.d_model)
+                temporal_out.view(
+                    x.size(0), x.size(1), x.size(2), self.d_model
+                )
             )
 
             # Return QKV for spatial and temporal if applied
