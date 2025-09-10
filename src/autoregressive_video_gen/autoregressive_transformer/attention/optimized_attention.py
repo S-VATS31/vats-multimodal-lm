@@ -15,9 +15,9 @@ from torch.amp import autocast
 
 from src.rms_norm import RMSNorm
 from src.optimized_attention import KVCache
-from utils.attention_utils import extend_kv_heads, setup_projections, apply_qk_norm
-from src.autoregressive_video_gen.autoregressive_transformer.attention.rope3d import NTKRoPE3D
+from utils.attention_utils import extend_kv_heads, apply_qk_norm
 
+torch.manual_seed(42)
 
 class CausalFactorizedAttention(nn.Module):
     """Causal attention layer utilizing factorized attention.
@@ -69,33 +69,23 @@ class CausalFactorizedAttention(nn.Module):
 
         # QKV proj
         if use_fused_proj:
-            self.qkv_proj, self.o_proj = setup_projections(
-                d_model=d_model,
-                num_heads=num_heads,
-                head_dim=self.head_dim,
-                use_fused_proj=use_fused_proj,
-                use_gqa=True,
-                use_proj_bias=use_proj_bias,
-                query_groups=query_groups
+            self.qkv_proj = nn.Linear(
+                d_model,
+                num_heads*self.head_dim + 2*query_groups*self.head_dim,
+                bias=use_proj_bias
             )
         else:
-            self.q_proj, self.k_proj, self.v_proj, self.o_proj = setup_projections(
-                d_model=d_model,
-                num_heads=num_heads,
-                head_dim=self.head_dim,
-                use_fused_proj=use_fused_proj,
-                use_gqa=True,
-                use_proj_bias=use_proj_bias,
-                query_groups=query_groups
-            )
+            self.q_proj = nn.Linear(d_model, d_model, bias=use_proj_bias)
+            self.k_proj = nn.Linear(d_model, query_groups*self.head_dim, bias=use_proj_bias)
+            self.v_proj = nn.Linear(d_model, query_groups*self.head_dim, bias=use_proj_bias)
+        
+        # Output projection
+        self.o_proj = nn.Linear(d_model, d_model, bias=use_proj_bias)
 
-        # Set up 3D RoPE
-        # self.ntk_rope3d = NTKRoPE3D(
-        #     head_dim=self.head_dim,
-        #     rope_theta=rope_theta,
-        #     use_ntk_rope=use_ntk_rope,
-        #     ntk_scale_factor=ntk_scale_factor
-        # )
+        # Spatio-temporal output concatenation projection
+        self.spatio_temporal_proj = nn.Linear(
+            2 * d_model, d_model, bias=use_proj_bias
+        )
     
     def _update_temporal_kv(
         self,
@@ -195,7 +185,7 @@ class CausalFactorizedAttention(nn.Module):
             padding_mask = padding_mask.bool()
             if attn_mode == "spatial":
                 # Reshape to [B*T, H*W] for spatial padding
-                padding_mask = padding_mask.view(-1, num_spatial_patches)
+                padding_mask = padding_mask.view(B*T, num_spatial_patches)
                 assert (
                     padding_mask.shape == (B*T, num_spatial_patches)
                 ), f"expected {(B*T, num_spatial_patches)}, got {padding_mask.shape}"
@@ -229,7 +219,7 @@ class CausalFactorizedAttention(nn.Module):
                     ), f"expected {(B*T, 1, query.size(2), key.size(2))}, got {causal_mask.shape}"
             else:
                 # Reshape to [B*H*W, T] for temporal padding
-                padding_mask = padding_mask.view(-1, T)
+                padding_mask = padding_mask.view(B*num_spatial_patches, T)
                 assert (
                     padding_mask.shape == (B*num_spatial_patches, T)
                 ), f"expected {(B*num_spatial_patches, T)}, got {padding_mask.shape}"
@@ -269,6 +259,7 @@ class CausalFactorizedAttention(nn.Module):
 
         # Expand to num_heads
         if attn_mask is not None:
+            attn_mask = attn_mask.bool()
             if attn_mode == "spatial":
                 attn_mask = attn_mask.expand(
                     B*T, self.num_heads, num_spatial_patches, key.size(2)
@@ -473,7 +464,6 @@ class CausalFactorizedAttention(nn.Module):
         # QKV proj
         if self.use_fused_proj:
             qkv = self.qkv_proj(x)
-
             if attn_mode == "spatial":
                 assert (
                     qkv.shape == (
@@ -544,9 +534,9 @@ class CausalFactorizedAttention(nn.Module):
                     q.shape == (B*T, num_spatial_patches, self.num_heads*self.head_dim)
                 ), f"expected {(B*T, num_spatial_patches, self.num_heads*self.head_dim)}, got {q.shape}"
                 assert (
-                    k.shape == v.shape == (B*num_spatial_patches, T, self.num_heads*self.head_dim)
+                    k.shape == v.shape == (B*T, num_spatial_patches, self.query_groups*self.head_dim)
                 ), (
-                    f"expected {(B*num_spatial_patches, T, self.query_groups*self.head_dim)}"
+                    f"expected {(B*T, num_spatial_patches, self.query_groups*self.head_dim)}"
                 )
             else:
                 assert (
@@ -590,10 +580,6 @@ class CausalFactorizedAttention(nn.Module):
         # Apply QK normalization
         if use_qk_norm:
             q, k = apply_qk_norm(query=q, key=k)
-
-        # Apply NTKRoPE3D
-        # q = self.ntk_rope3d(q)
-        # k = self.ntk_rope3d(k)
 
         # Extend KV heads
         k = extend_kv_heads(
@@ -686,10 +672,11 @@ class CausalFactorizedAttention(nn.Module):
             spatial_out = spatial_out.view(
                 x.size(0), x.size(1), x.size(2), self.d_model
             )
+            spatial_out += x
 
             # [B*H*W, T, d_model]
             temporal_out = self._temporal_attention(
-                spatial_out,
+                x,
                 use_mqa=use_mqa,
                 use_qk_norm=use_qk_norm,
                 use_causal=use_causal,
@@ -702,11 +689,16 @@ class CausalFactorizedAttention(nn.Module):
             )
 
             # [B, T, H*W, d_model]
-            spatio_temporal_out = (
-                temporal_out.view(
-                    x.size(0), x.size(1), x.size(2), self.d_model
-                )
+            temporal_out = temporal_out.view(
+                x.size(0), x.size(1), x.size(2), self.d_model
             )
+            temporal_out += x
+
+            # [B, T_frames, H*W, 2*d_model]
+            spatio_temporal_out = torch.cat([spatial_out, temporal_out], dim=-1)
+
+            # Project back to d_model
+            spatio_temporal_out = self.spatio_temporal_proj(spatio_temporal_out)
 
             # Return QKV for spatial and temporal if applied
             if return_qkv:
@@ -813,7 +805,7 @@ class CausalFactorizedAttentionBlock(nn.Module):
             torch.Tensor: Spatio-temporal output of same shape as input.
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return x + self.dropout(
+            return self.dropout(
                 self.attention(
                     self.rms_norm(x),
                     use_mqa=use_mqa,
@@ -824,25 +816,32 @@ class CausalFactorizedAttentionBlock(nn.Module):
                     use_cache=use_cache,
                     padding_mask=padding_mask,
                     kv_cache=kv_cache,
-                    layer_idx=layer_idx
+                    layer_idx=layer_idx,
                 )
             )
+        
+def test_numerical_stability(name: str, input: torch.Tensor) -> None:
+    print(f"{name}: isnan? {input.isnan().any()}")
+    print(f"{name}: ininf? {input.isinf().any()}")
+    print(f"{name}: isfinite? {input.isfinite().all()}")
+    print(f"{name}: isreal? {input.isreal().all()}")
 
 def test_attention():
     d_model, num_heads, query_groups, rope_theta = 512, 32, 8, 10000.0
-    softmax_scale = 1 / (d_model // num_heads) ** 0.5
-    use_proj_bias, use_fused_proj, use_windowed_attn = False, True, True
+    softmax_scale = 4.0
+    use_proj_bias, use_fused_proj, use_windowed_attn = False, True, False
     use_ntk_rope, ntk_scale_factor = True, 0.7
     attention = CausalFactorizedAttention(
         d_model, num_heads, query_groups,rope_theta, 
-        softmax_scale, use_proj_bias,use_fused_proj, 
+        softmax_scale, use_proj_bias, use_fused_proj, 
         use_windowed_attn, use_ntk_rope, ntk_scale_factor
     ).to(device)
     B, T, H, W = 1, 8, 32, 32
     x = torch.randn(B, T, H*W, d_model).to(device)
+    print(f"input: {x}")
     padding_mask = torch.randint(
         0, 2, (B, T*H*W), dtype=torch.bool
-    ).to(device)
+    )
     (
         x_out, 
         spatial_q, spatial_k, spatial_v, 
@@ -855,11 +854,16 @@ def test_attention():
         left_window=-1,
         right_window=-1,
         use_cache=False,
-        padding_mask=padding_mask,
+        padding_mask=None,
         kv_cache=None,
         layer_idx=None,
         return_qkv=True
-    )    
+    )
+    loss = x_out.sum()
+    loss.backward()
+    for name, param in attention.named_parameters():
+        print(f"{name}: {param.grad}")
+        test_numerical_stability(name, param.grad)
 
     return (
         x_out,
@@ -869,21 +873,21 @@ def test_attention():
 
 def test_attention_block():
     d_model, num_heads, query_groups, rope_theta = 512, 32, 8, 10000.0
-    softmax_scale = 1 / (d_model // num_heads) ** 0.5
-    use_proj_bias, use_fused_proj, use_windowed_attn = False, True, True
+    softmax_scale = 4.0
+    use_proj_bias, use_fused_proj, use_windowed_attn = False, True, False
     use_ntk_rope, ntk_scale_factor = True, 0.7
-    eps, dropout = 1e-12, 0.15
-    attention = CausalFactorizedAttentionBlock(
+    eps, dropout = 1e-7, 0.15
+    attention_block = CausalFactorizedAttentionBlock(
         d_model, num_heads, query_groups,rope_theta, 
-        softmax_scale, use_proj_bias,use_fused_proj, 
+        softmax_scale, use_proj_bias, use_fused_proj, 
         use_windowed_attn, use_ntk_rope, eps, dropout, ntk_scale_factor
     ).to(device)
     B, T, H, W = 1, 8, 32, 32
     x = torch.randn(B, T, H*W, d_model).to(device)
     padding_mask = torch.randint(
         0, 2, (B, T*H*W), dtype=torch.bool
-    ).to(device)
-    x_out = attention(
+    )
+    out = attention_block(
         x,
         use_mqa=False,
         use_qk_norm=True,
@@ -894,20 +898,25 @@ def test_attention_block():
         padding_mask=padding_mask,
         kv_cache=None,
         layer_idx=None,
-    )    
+    )
+    loss = out.sum()
+    loss.backward()
+    for name, param in attention_block.named_parameters():
+        print(f"{name}: {param.grad}")
+        test_numerical_stability(name, param.grad)
 
-    return x_out
+    return out
 
 if __name__ == "__main__":
-    x_attn_block = test_attention_block()
-    print(x_attn_block.shape)
+    test_attention_block()
 
 # if __name__ == "__main__":
-#     x_out, spatial_q, spatial_k, spatial_v, temporal_q, temporal_k, temporal_v = test_attention()
-#     print(x_out.shape)
-#     print(spatial_q.shape)
-#     print(spatial_k.shape)
-#     print(spatial_v.shape)
-#     print(temporal_q.shape)
-#     print(temporal_k.shape)
-#     print(temporal_v.shape)
+#     out, sq, sk, sv, tq, tk, tv = test_attention()
+#     print(f"output: {out}")
+#     test_numerical_stability("out", out)
+#     test_numerical_stability("sq", sq)
+#     test_numerical_stability("sk", sk)
+#     test_numerical_stability("sv", sv)
+#     test_numerical_stability("tq", tq)
+#     test_numerical_stability("tk", tk)
+#     test_numerical_stability("tv", tv)

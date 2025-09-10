@@ -62,6 +62,7 @@ class FactorizedCrossAttention(nn.Module):
             use_proj_bias=use_proj_bias, 
             query_groups=query_groups
         )
+        self.spatio_temporal_proj = nn.Linear(2*d_model, d_model, bias=use_proj_bias)
 
     def _optimized_attention(
         self,
@@ -174,7 +175,7 @@ class FactorizedCrossAttention(nn.Module):
             attn_out
             .transpose(1, 2)
             .contiguous()
-            .view(query.size(0), query.size(2), -1)
+            .view(query.size(0), query.size(2), self.d_model)
         )
 
         return attn_out
@@ -281,7 +282,7 @@ class FactorizedCrossAttention(nn.Module):
         ), "expected x.size(-1) == text_embeddings.size(-1)"
 
         # Reshape image tensor to [B*T_frames, H*W, d_model] for spatial attn
-        x = x.view(-1, num_spatial_patches, self.d_model)
+        x = x.view(B*T_frames, num_spatial_patches, self.d_model)
 
         # Project input tensors
         # q: [B*T_frames, H*W, d_model]; k, v shape: [B, T_tokens, query_groups*head_dim]
@@ -368,7 +369,7 @@ class FactorizedCrossAttention(nn.Module):
         ), "x.size(-1) == text_embeddings.size(-1) must be True."
 
         # Reshape x to [B*H*W, T_frames, d_model] for temporal attn
-        x = x.view(-1, T_frames, self.d_model)
+        x = x.view(B*num_spatial_patches, T_frames, self.d_model)
 
         assert (
             x.shape == (B*num_spatial_patches, T_frames, self.d_model)
@@ -456,12 +457,13 @@ class FactorizedCrossAttention(nn.Module):
 
             # [B, T_frames, H*W, d_model]
             spatial_out = spatial_out.view(
-                x.size(0), x.size(1), -1, self.d_model
+                x.size(0), x.size(1), x.size(2), self.d_model
             )
+            spatial_out += x
 
             # [B*H*W, T_frames, d_model]
             temporal_out = self._temporal_cross_attention(
-                spatial_out,
+                x,
                 text_embeddings=text_embeddings,
                 use_mqa=use_mqa,
                 use_qk_norm=use_qk_norm,
@@ -469,14 +471,21 @@ class FactorizedCrossAttention(nn.Module):
             )
 
             # [B, T_frames, H*W, d_model]
-            spatio_temporal_out = temporal_out.view(
-                x.size(0), x.size(1), -1, self.d_model
+            temporal_out = temporal_out.view(
+                x.size(0), x.size(1), x.size(2), self.d_model
             )
+            temporal_out += x
+
+            # [B, T_frames, H*W, 2*d_model]
+            spatio_temporal_out = torch.cat([spatial_out, temporal_out], dim=-1)
+
+            # Project back down to d_model]
+            spatio_temporal_out = self.spatio_temporal_proj(spatio_temporal_out)
 
             return self.o_proj(spatio_temporal_out)
 
 class FactorizedCrossAttentionBlock(nn.Module):
-    """Factorized cross attention layer applying attn, normalizagion, dropout, and residuals.
+    """Factorized cross attention layer applying attn, normalization, dropout, and residuals.
     
     Args:
         d_model (int): Dimensionality of model embeddings.

@@ -345,10 +345,12 @@ def test_model_forward():
         causal_padding_mask=image_padding_mask,
         cross_padding_mask=text_padding_mask
     )
-    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    return x_out, params
+    loss = x_out.sum()
+    loss.backward()
+    for name, param in model.named_parameters():
+        print(f"{name}: {param.grad}")
+    return x_out
 
 if __name__ == "__main__":
     x, params = test_model_forward()
     print(x.shape) # [1, 144, d_model]
-    print(f"{params:,}")

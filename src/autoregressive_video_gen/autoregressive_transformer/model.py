@@ -10,7 +10,7 @@ from torch.utils.checkpoint import checkpoint
 from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
 from src.optimized_attention import KVCache
-from configs.autoregressive_video_gen.autoregressive_transformer.model_args.model_args_large import ModelArgs
+from configs.autoregressive_video_gen.autoregressive_transformer.model_args.model_args_xsmall import ModelArgs
 from src.autoregressive_video_gen.autoregressive_transformer.attention.cross_attention import FactorizedCrossAttentionBlock
 from src.autoregressive_video_gen.autoregressive_transformer.attention.optimized_attention import CausalFactorizedAttentionBlock
 
@@ -143,7 +143,6 @@ class AutoregressiveVideoTransformerBlock(nn.Module):
 
             return block_out
 
-
 class AutoregressiveVideoTransformer(nn.Module):
     """Autoregressive transformer stacking blocks.
     
@@ -197,7 +196,7 @@ class AutoregressiveVideoTransformer(nn.Module):
         )
 
         # Initialize weights
-        # self.apply(self._init_weights)
+        self.apply(self._init_weights)
 
     def _init_weights(self, module) -> None:
         """Initialize weights based on given module.
@@ -205,11 +204,19 @@ class AutoregressiveVideoTransformer(nn.Module):
         Args:
             module: Module to be initialized.
         """
-        pass
+        if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding):
+            nn.init.xavier_uniform_(module.weight)
+            if hasattr(module, 'bias') and module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, (nn.LayerNorm, RMSNorm)):
+            if hasattr(module, 'weight') and module.weight is not None:
+                nn.init.ones_(module.weight)
+            if hasattr(module, 'bias') and module.bias is not None:
+                nn.init.zeros_(module.bias)
 
     def forward(
         self,
-        x: torch.Tensor,
+        x: torch.LongTensor,
         text_embeddings: torch.Tensor,
         use_cache: bool,
         spatio_temoral_padding_mask: Optional[torch.Tensor] = None,
@@ -229,18 +236,23 @@ class AutoregressiveVideoTransformer(nn.Module):
         """
         assert x.dim() == 4, f"expected 4 dims, got {x.dim()} dims"
         assert text_embeddings.dim() == 3, f"expected 3 dims, got {text_embeddings.dim()} dims"
-        assert (
-            spatio_temoral_padding_mask.dim() == 2
-        ), f"expected 2 dims, got {spatio_temoral_padding_mask.dim()} dims"
-        assert (
-            text_padding_mask.dim() == 2
-        ), f"expected 2 dims, got {text_padding_mask.dim()} dims"
-        assert (
-            spatio_temoral_padding_mask.shape == (x.size(0), x.size(1)*x.size(2)*x.size(3))
-        ), f"expected {(x.size(0), x.size(1)*x.size(2)*x.size(3))}, got {spatio_temoral_padding_mask.shape}"
-        assert (
-            text_padding_mask.shape == (text_embeddings.size(0), text_embeddings.size(1))
-        ), f"expected {(text_embeddings.size(0), text_embeddings.size(1))}, got {text_padding_mask.shape}"
+        if spatio_temoral_padding_mask is not None:
+            assert (
+                spatio_temoral_padding_mask.dim() == 2
+            ), f"expected 2 dims, got {spatio_temoral_padding_mask.dim()} dims"
+            assert (
+                spatio_temoral_padding_mask.shape == (x.size(0), x.size(1)*x.size(2)*x.size(3))
+            ), f"expected {(x.size(0), x.size(1)*x.size(2)*x.size(3))}, got {spatio_temoral_padding_mask.shape}"
+        if text_padding_mask is not None:
+            assert (
+                text_padding_mask.dim() == 2
+            ), f"expected 2 dims, got {text_padding_mask.dim()} dims"
+            assert (
+                text_padding_mask.shape == (text_embeddings.size(0), text_embeddings.size(1))
+            ), f"expected {(text_embeddings.size(0), text_embeddings.size(1))}, got {text_padding_mask.shape}"
+
+        if x.dtype != torch.int64:
+            x = x.to(torch.int64)
 
         # [B, T_frames, H*W, d_model]
         x = self.dropout(self.embedding(x))
@@ -251,7 +263,7 @@ class AutoregressiveVideoTransformer(nn.Module):
 
         B, T_frames, H, W, _ = x.shape # will be used for reshaping later
 
-        x = x.view(x.size(0), x.size(1), -1, x.size(-1))
+        x = x.view(x.size(0), x.size(1), H*W, x.size(-1))
         assert (
             x.shape == (B, T_frames, H*W, self.model_args.d_model)
         ), f"expected {(B, T_frames, H*W, self.model_args.d_model)}, got {x.shape}"
@@ -285,24 +297,25 @@ class AutoregressiveVideoTransformer(nn.Module):
                     left_window=self.model_args.left_window,
                     right_window=self.model_args.right_window,
                     use_cache=use_cache,
-                    spatio_temoral_padding_mask=spatio_temoral_padding_mask,
+                    spatio_temporal_padding_mask=spatio_temoral_padding_mask,
                     text_padding_mask=text_padding_mask,
                     kv_cache=self.kv_cache,
                     layer_idx=layer_idx
                 )
+                
 
         assert x.dim() == 4, f"expected 4 dims, got {x.dim()} dims"
 
         # Apply RMSNorm
         x = self.rms_norm(x)
 
-        return x.view(B, T_frames, H, W, -1)  # [B, T, H, W, d_model]
+        return x.view(B, T_frames, H, W, self.model_args.d_model)  # [B, T, H, W, d_model]
 
 def test_transformer_block():
-    d_model, num_heads, query_groups, rope_theta = 512, 32, 8, 10000.0
-    softmax_scale, d_ffn = (d_model // num_heads) ** 0.5, 4*d_model
+    d_model, num_heads, query_groups, rope_theta = 128, 16, 4, 5000.0
+    softmax_scale, d_ffn = 1/((d_model // num_heads) ** 0.5), 4*d_model
     use_proj_bias, use_fused_proj, use_windowed_attn = False, True, True
-    use_ntk_rope, eps, dropout, ntk_scale_factor = True, 1e-12, 0.15, 0.7
+    use_ntk_rope, eps, dropout, ntk_scale_factor = True, 1e-5, 0.15, 0.7
     transformer_block = AutoregressiveVideoTransformerBlock(
         d_model, num_heads, query_groups,
         rope_theta, softmax_scale, use_proj_bias,
@@ -326,7 +339,7 @@ def test_transformer_block():
         head_dim=d_model//num_heads,
         num_layers=4
     )
-    x_out = transformer_block(
+    out = transformer_block(
         x,
         text_embeddings=text_embeddings,
         use_mqa=False,
@@ -340,19 +353,17 @@ def test_transformer_block():
         kv_cache=kv_cache,
         layer_idx=1
     )
-    return x_out
+    loss = out.sum()
+    loss.backward()
+    for name, param in transformer_block.named_parameters():
+        print(f"{name}: {param.grad.isnan().any()}")
 
 def test_transformer_forward():
     model_args = ModelArgs()
     model = AutoregressiveVideoTransformer(model_args).to(device)
-    B, T_frames, H, W = 1, 15, 32, 32
-    T_tokens = 16
-    x = torch.randint(
-        low=0, 
-        high=model_args.num_embeddings,
-        size=(B, T_frames, H, W),
-        device=device
-    )
+    B, T_frames, H, W = 1, 2, 8, 8
+    T_tokens = 3
+    x = torch.randint(0, model_args.num_embeddings, (B, T_frames, H, W),device=device)
     text_embeddings = torch.randn(B, T_tokens, model_args.d_model).to(device)
     spatio_temporal_padding_mask = torch.randint(
         0, 2, (B, T_frames*H*W), dtype=torch.bool
@@ -360,16 +371,18 @@ def test_transformer_forward():
     text_padding_mask = torch.randint(
         0, 2, (B, T_tokens), dtype=torch.bool
     ).to(device)
-    x_out = model(
+    out: torch.Tensor = model(
         x,
         text_embeddings=text_embeddings,
-        use_cache=True,
+        use_cache=False,
         spatio_temoral_padding_mask=spatio_temporal_padding_mask,
         text_padding_mask=text_padding_mask
     )
-    return x_out
-
+    loss = out.float().sum()
+    loss.backward()
+    for name, param in model.named_parameters():
+        print(f"{name}: {param.grad}")
+    return out
 
 if __name__ == "__main__":
-    x = test_transformer_forward()
-    print(x.shape)
+    test_transformer_forward()
