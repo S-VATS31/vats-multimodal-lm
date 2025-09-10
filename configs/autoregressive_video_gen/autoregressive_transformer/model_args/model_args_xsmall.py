@@ -6,13 +6,13 @@ class ModelArgs:
     """Large configuration of model arguments 1.2 billion parameters."""
     patch_size: Tuple[int, int, int] = (2, 4, 4)
     max_frames: int = 10
-    d_model: int = 1024
-    num_heads: int = 32
-    query_groups: int = 8
+    d_model: int = 128
+    num_heads: int = 16
+    query_groups: int = 4
     max_batch_size: int = 32
     softmax_scale = 1 / ((128//8) ** 0.5)
-    d_ffn: int = 4*1024
-    num_layers: int = 16
+    d_ffn: int = 512
+    num_layers: int = 4
     dropout: float = 0.1
     rope_theta: float = 10000.0
     use_ntk_rope: bool = True
