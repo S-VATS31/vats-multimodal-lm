@@ -136,14 +136,12 @@ def test_non_square_input_hw():
     pass
 
 def test_gradients():
-    x_image = torch.randint()
     out = model(
         x, text_embeddings, False, image_padding_mask, text_padding_mask
     )
     loss = out.sum()
     loss.backward()
-    for _, param in model.named_parameters():
-        print(param.grad)
+    for name, param in model.named_parameters():
         assert torch.all(torch.isfinite(param.grad))
         assert torch.all(torch.isreal(param.grad))
         assert torch.all(torch.isfinite(param.grad.norm()))
@@ -152,6 +150,7 @@ def test_gradients():
         assert not torch.all(torch.isinf(param.grad))
         assert not torch.all(torch.isnan(param.grad.norm()))
         assert not torch.all(torch.isinf(param.grad.norm()))
+    print("PASSED FLOWING GRADIENTS TEST")
 
 def test_numerical_stability():
     pass
