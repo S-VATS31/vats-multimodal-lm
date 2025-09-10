@@ -104,7 +104,8 @@ def test_gradients():
     out = attn(x, False, True, True, -1, -1, False)
     loss = out.sum()
     loss.backward()
-    for _, param in attn.named_parameters():
+    for name, param in attn.named_parameters():
+        print(f"{name}: {param.grad}")
         assert (
             param.grad is not None and 
             not torch.any(torch.isnan(param.grad)) and

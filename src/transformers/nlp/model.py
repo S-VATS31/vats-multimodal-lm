@@ -335,6 +335,10 @@ def test_model_forward():
     logits, _, aux_loss = model(
         input_ids, padding_mask, use_cache
     )
+    loss = logits.sum()
+    loss.backward()
+    for name, param in model.named_parameters():
+        print(f"{name}: {param.grad}")
     return logits, aux_loss
 
 if __name__ == "__main__":

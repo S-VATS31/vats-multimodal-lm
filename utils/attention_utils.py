@@ -97,6 +97,6 @@ def apply_qk_norm(
         This is equivalent to calculating the L2 Norm for high-dim tensors.
     """
     return (
-        F.normalize(query, p=2, dim=-1),
-        F.normalize(key, p=2, dim=-1)
+        F.normalize(query, p=2, dim=-1, eps=1e-6),
+        F.normalize(key, p=2, dim=-1, eps=1e-6)
     )
