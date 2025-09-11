@@ -1,12 +1,5 @@
-from configs.setup_env import (
-    device,
-    dtype,
-    gpu_dtypes,
-    use_flash_attn,
-    flash_attn_varlen_qkvpacked_func
-)
+from configs.setup_env import device, dtype
 
-# TODO: Implement optimized attention using flash attention.
 
 from typing import Tuple, Optional
 
@@ -51,40 +44,7 @@ class CrossAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, d_model, bias=use_proj_bias)
         self.o_proj = nn.Linear(d_model, d_model, bias=use_proj_bias)
 
-    def _optimized_attention(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        padding_mask: torch.Tensor = None
-    ) -> torch.Tensor:
-        """Optimized attention mechanism leveraging flash attention.
-        
-        Args:
-            query (torch.Tensor): Query tensor of shape [B, T, num_heads, head_dim].
-            key (torch.Tensor): Key tensor of shape [B, T, num_heads, head_dim].
-            value (torch.Tesnor): Value tensor of shape [B, T, num_heads, head_dim].
-            padding_mask (torch.Tensor): Padding tensor of shape [B, T_k].
-
-        Returns:
-            torch.Tensor: Output tensor of shape [B, T, d_model].
-        """
-        if (
-            flash_attn_varlen_qkvpacked_func is not None
-            and use_flash_attn and device.type == "cuda"
-            and query.dtype in gpu_dtypes
-            and key.dtype in gpu_dtypes
-            and value.dtype in gpu_dtypes
-            and query.is_cuda and key.is_cuda and value.is_cuda
-        ):
-            if padding_mask is not None:
-                pass
-            else:
-                raise ValueError("must using padding mask")
-        else:
-            return self._torch_attention(query, key, value, padding_mask)
-
-    def _torch_attention(
+    def _dot_product_attention(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -236,7 +196,7 @@ class CrossAttention(nn.Module):
         """
         q, k, v = self._setup_qkv(x, text_embeddings)
         # Get cross attention output
-        cross_attn_out = self._optimized_attention(q, k, v, padding_mask)
+        cross_attn_out = self._dot_product_attention(q, k, v, padding_mask)
         
         return cross_attn_out
 
@@ -326,7 +286,7 @@ def main(use_pad: bool):
     cross_attn = CrossAttentionBlock(
         d_model, num_heads, softmax_scale, use_proj_bias=False, eps=eps, dropout=dropout
     ).to(device)
-    B, H, W = 1, 72, 144
+    B, H, W = 2, 72, 144
     T_q = H*W
     T_k = 16
     x_image = torch.randn(B, T_q, d_model).to(device)
