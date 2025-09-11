@@ -672,7 +672,7 @@ class CausalFactorizedAttention(nn.Module):
             spatial_out = spatial_out.view(
                 x.size(0), x.size(1), x.size(2), self.d_model
             )
-            spatial_out += x
+            spatial_out = spatial_out + x # Spatial residual
 
             # [B*H*W, T, d_model]
             temporal_out = self._temporal_attention(
@@ -692,7 +692,7 @@ class CausalFactorizedAttention(nn.Module):
             temporal_out = temporal_out.view(
                 x.size(0), x.size(1), x.size(2), self.d_model
             )
-            temporal_out += x
+            temporal_out = temporal_out + x # Temporal residual
 
             # [B, T_frames, H*W, 2*d_model]
             spatio_temporal_out = torch.cat([spatial_out, temporal_out], dim=-1)
@@ -908,15 +908,12 @@ def test_attention_block():
     return out
 
 if __name__ == "__main__":
-    test_attention_block()
-
-# if __name__ == "__main__":
-#     out, sq, sk, sv, tq, tk, tv = test_attention()
-#     print(f"output: {out}")
-#     test_numerical_stability("out", out)
-#     test_numerical_stability("sq", sq)
-#     test_numerical_stability("sk", sk)
-#     test_numerical_stability("sv", sv)
-#     test_numerical_stability("tq", tq)
-#     test_numerical_stability("tk", tk)
-#     test_numerical_stability("tv", tv)
+    out, sq, sk, sv, tq, tk, tv = test_attention()
+    print(f"output: {out}")
+    test_numerical_stability("out", out)
+    test_numerical_stability("sq", sq)
+    test_numerical_stability("sk", sk)
+    test_numerical_stability("sv", sv)
+    test_numerical_stability("tq", tq)
+    test_numerical_stability("tk", tk)
+    test_numerical_stability("tv", tv)

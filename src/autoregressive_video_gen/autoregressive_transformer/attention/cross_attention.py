@@ -1,12 +1,6 @@
-from configs.setup_env import (
-    device,
-    dtype,
-    gpu_dtypes,
-    use_flash_attn,
-    flash_attn_varlen_qkvpacked_func
-)
+from configs.setup_env import device, dtype
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Literal
 
 import torch
 import torch.nn as nn
@@ -64,93 +58,94 @@ class FactorizedCrossAttention(nn.Module):
         )
         self.spatio_temporal_proj = nn.Linear(2*d_model, d_model, bias=use_proj_bias)
 
-    def _optimized_attention(
+    def _cross_attention(
         self,
+        x: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        padding_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """Optimized cross attention leveraging flash attention.
-        
-        Args:
-            query (torch.Tensor): Query tensor for video to be generated.
-            key (torch.Tensor): Key tensor for input text tokens.
-            value (torch.Tensor): Value tensor for input text tokens.
-            padding_mask (torch.Tensor): Padding mask of shape [B, T_tokens].
-
-        Args:
-            torch.Tensor: Attention output of shape [B, T_frames, H*W, d_model].
-        """
-        if (
-            flash_attn_varlen_qkvpacked_func is not None
-            and use_flash_attn and device.type == "cuda"
-            and query.dtype in gpu_dtypes
-            and key.dtype in gpu_dtypes
-            and value.dtype in gpu_dtypes
-            and query.is_cuda and key.is_cuda and value.is_cuda
-        ):
-            pass
-        else:
-            return self._torch_attention(
-                query=query.transpose(1, 2),
-                key=key.transpose(1, 2),
-                value=value.transpose(1, 2),
-                padding_mask=padding_mask
-            )
-
-    def _torch_attention(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        attn_mode: Literal["spatial", "temporal"],
         padding_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Fallback to optimized attention using PyTorch dot product attention.
         
         Args:
+            x (torch.Tensor): Input tensor of shape [B, T_frames, H*W, d_model].
             query (torch.Tensor): Query tensor for video to be generated.
             key (torch.Tensor): Key tensor for input text tokens.
             value (torch.Tensor): Value tensor for input text tokens.
+            attn_mode (Literal["spatial", "temporal"]): Whether to apply spatial or temporl attn.
             padding_mask (torch.Tensor): Padding mask of shape [B, T_tokens].
 
         Args:
             torch.Tensor: Attention output of shape [B, T_frames, H*W, d_model].
         """
+        # T_tokens = kv seqlen, T_frames = q seqlen
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+
+        _, T_frames, num_spatial_patches, _ = x.shape
+
+        assert x.size(0) == key.size(0) == value.size(0)
+
+        assert (
+            x.size(-1) == self.d_model
+        ), f"expected {self.d_model}, got {x.size(-1)}"
+
+        # Ensure dim 0 is equal for q, k, v, padding mask
+        if attn_mode == "spatial":
+            key = key.repeat_interleave(T_frames, dim=0)
+            value = value.repeat_interleave(T_frames, dim=0)
+            if padding_mask is not None:
+                padding_mask = padding_mask.repeat_interleave(T_frames, dim=0)
+        elif attn_mode == "temporal":
+            key = key.repeat_interleave(num_spatial_patches, dim=0)
+            value = value.repeat_interleave(num_spatial_patches, dim=0)
+            if padding_mask is not None:
+                padding_mask = padding_mask.repeat_interleave(num_spatial_patches, dim=0)
+        else:
+            raise ValueError(f"expected 'spatial' or 'temporal', got {attn_mode}")
+
         # Handle padding mask
         if padding_mask is not None:
             assert (
-                padding_mask.shape == (key.size(0), key.size(2))
-            ), f"expected {key.size(0), key.size(2)}, got {padding_mask.shape}"
-            # [B, T_tokens], torch.BoolTensor
+                padding_mask.shape == (key.size(0), key.size(2)) # [B, T_k]
+            ), f"expected {(key.size(0), key.size(2))}, got {padding_mask.shape}"
             padding_mask = padding_mask.bool()
-            padding_mask = padding_mask[:, None, None, :] # [B, 1, 1, T_tokens]
+            attn_mask = padding_mask[:, None, None, :] # [B, 1, 1, T_k]
             assert (
-                padding_mask.shape == (key.size(0), 1, 1, key.size(2))
-            ), f"expected {(key.size(0), 1, 1, key.size(2))}, got {padding_mask.shape}"
-            # if spatial: [B*T_frames, 1, H*W, T_tokens]
-            # if temporal: [B*H*W, 1, T_frames, T_tokens]
-            attn_mask = padding_mask.expand(
-                query.size(0), 1, query.size(2), key.size(2)
-            )
+                attn_mask.shape == (key.size(0), 1, 1, key.size(2))
+            ), f"expected {(key.size(0), 1, 1, key.size(2))}, got {attn_mask.shape}"
             assert (
-                attn_mask.shape == (query.size(0), 1, query.size(2), key.size(2))
-            ), f"expected {(query.size(0), 1, query.size(2), key.size(2))}, got {attn_mask.shape}"
+                attn_mask.dtype == torch.bool
+            ), f"expected bool, got {attn_mask.dtype}"
         else:
             attn_mask = None
 
-        # Manually expand to num_heads
         if attn_mask is not None:
-            attn_mask = attn_mask.expand(
-                query.size(0), self.num_heads, query.size(2), key.size(2)
-            )
-            assert (
-                attn_mask.shape == (
-                    query.size(0), self.num_heads, query.size(2), key.size(2)
+            if attn_mode == "spatial":
+                attn_mask = attn_mask.expand(
+                    key.size(0), self.num_heads, num_spatial_patches, key.size(2)
                 )
-            ), f"expected {(
-                query.size(0), self.num_heads, query.size(2), key.size(2)
-            )}, got {attn_mask.shape}"
+                assert (
+                    attn_mask.shape == (
+                        key.size(0), self.num_heads, num_spatial_patches, key.size(2)
+                    )
+                ), f"expected {(
+                    key.size(0), self.num_heads, num_spatial_patches, key.size(2)
+                )}, got {attn_mask.shape}"
+            else:
+                attn_mask = attn_mask.expand(
+                    key.size(0), self.num_heads, T_frames, key.size(2)
+                )
+                assert (
+                    attn_mask.shape == (
+                        key.size(0), self.num_heads, T_frames, key.size(2)
+                    )
+                ), f"expected {(
+                    key.size(0), self.num_heads, T_frames, key.size(2)
+                )}, got {attn_mask.shape}"
 
         # Get attn out
         attn_out = F.scaled_dot_product_attention(
@@ -162,14 +157,6 @@ class FactorizedCrossAttention(nn.Module):
             scale=self.softmax_scale,
             enable_gqa=False
         ) # [:, num_heads, :, head_dim]
-
-        assert (
-            attn_out.shape == (
-                query.size(0), self.num_heads, query.size(2), self.head_dim
-            )
-        ), f"expected {(
-            query.size(0), self.num_heads, query.size(2), self.head_dim
-        )}, got {attn_out.shape}"
 
         attn_out = (
             attn_out
@@ -206,10 +193,12 @@ class FactorizedCrossAttention(nn.Module):
             use_mqa=use_mqa,
             use_qk_norm=use_qk_norm
         )
-        spatial_out = self._optimized_attention(
+        spatial_out = self._cross_attention(
+            x,
             query=q,
             key=k,
             value=v,
+            attn_mode="spatial",
             padding_mask=padding_mask
         )
 
@@ -241,10 +230,12 @@ class FactorizedCrossAttention(nn.Module):
             use_mqa=use_mqa,
             use_qk_norm=use_qk_norm
         )
-        temporal_out = self._optimized_attention(
+        temporal_out = self._cross_attention(
+            x,
             query=q,
             key=k,
             value=v,
+            attn_mode="temporal",
             padding_mask=padding_mask
         )
 
@@ -459,7 +450,7 @@ class FactorizedCrossAttention(nn.Module):
             spatial_out = spatial_out.view(
                 x.size(0), x.size(1), x.size(2), self.d_model
             )
-            spatial_out += x
+            spatial_out = spatial_out + x # Spatial residual
 
             # [B*H*W, T_frames, d_model]
             temporal_out = self._temporal_cross_attention(
@@ -474,7 +465,7 @@ class FactorizedCrossAttention(nn.Module):
             temporal_out = temporal_out.view(
                 x.size(0), x.size(1), x.size(2), self.d_model
             )
-            temporal_out += x
+            temporal_out = temporal_out + x # Temporal residual
 
             # [B, T_frames, H*W, 2*d_model]
             spatio_temporal_out = torch.cat([spatial_out, temporal_out], dim=-1)
@@ -541,7 +532,7 @@ class FactorizedCrossAttentionBlock(nn.Module):
             torch.Tensor: Output tensor of shape [B, T, H*W, d_model].
         """
         with autocast(device_type=device.type, dtype=dtype):
-            return x + self.dropout(
+            return self.dropout(
                 self.cross_attention(
                     self.rms_norm(x),
                     text_embeddings=text_embeddings,
@@ -591,7 +582,7 @@ def test_attention():
         d_model, num_heads, query_groups,
         softmax_scale, use_proj_bias=False
     ).to(device)
-    B, T_frames, H, W = 1, 8, 32, 32
+    B, T_frames, H, W = 4, 8, 32, 32
     T_tokens = 16
     x = torch.randn(B, T_frames, H*W, d_model).to(device)
     text_embeddings = torch.randn(B, T_tokens, d_model).to(device)
@@ -601,37 +592,13 @@ def test_attention():
     x_out = cross_attn(
         x, text_embeddings, False, True, padding_mask
     )
-    return x_out
-
-def test_attention_block():
-    d_model, num_heads, query_groups = 512, 32, 8
-    softmax_scale = (d_model // num_heads) ** 0.5
-    eps, dropout = 1e-12, 0.15
-    cross_attn = FactorizedCrossAttentionBlock(
-        d_model, num_heads, query_groups,
-        softmax_scale, use_proj_bias=False, 
-        eps=eps, dropout=dropout
-    ).to(device)
-    B, T_frames, H, W = 1, 8, 32, 32
-    T_tokens = 16
-    x = torch.randn(B, T_frames, H*W, d_model).to(device)
-    text_embeddings = torch.randn(B, T_tokens, d_model).to(device)
-    padding_mask = torch.randint(
-        0, 2, (B, T_tokens), dtype=torch.bool
-    )
-    x_out = cross_attn(
-        x, text_embeddings, False, True, padding_mask
-    )
+    loss = x_out.sum()
+    loss.backward()
+    for name, param in cross_attn.named_parameters():
+        print(f"{name}: {param.grad}")
     return x_out
 
 if __name__ == "__main__":
-    # [B, T_frames, H*W, d_model]
-    # [1, 8, 1024, 512]
-    x = test_attention_block()
+    x = test_attention()
     print(x.shape)
 
-# if __name__ == "__main__":
-#     q, k, v = test_temporal_qkv()
-#     print(q.shape)
-#     print(k.shape)
-#     print(v.shape)

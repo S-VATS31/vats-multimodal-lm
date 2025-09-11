@@ -11,7 +11,7 @@ model_args = ModelArgs()
 
 def setup():
     model = AutoregressiveVideoTransformer(model_args).to(device)
-    B, T_frames, H, W = 1, 8, 16, 16
+    B, T_frames, H, W = 2, 8, 16, 16
     T_tokens = 12
     x = torch.randint(
         0, model_args.num_embeddings, (B, T_frames, H, W), dtype=torch.int64
@@ -141,7 +141,7 @@ def test_gradients():
     )
     loss = out.sum()
     loss.backward()
-    for name, param in model.named_parameters():
+    for _, param in model.named_parameters():
         assert torch.all(torch.isfinite(param.grad))
         assert torch.all(torch.isreal(param.grad))
         assert torch.all(torch.isfinite(param.grad.norm()))
@@ -153,13 +153,42 @@ def test_gradients():
     print("PASSED FLOWING GRADIENTS TEST")
 
 def test_numerical_stability():
-    pass
+    out = model(
+        x, text_embeddings, True, image_padding_mask, text_padding_mask
+    )
+    assert torch.all(torch.isfinite(out))
+    assert torch.all(torch.isreal(out))
+    assert torch.all(torch.isfinite(out.norm()))
+    assert torch.all(torch.isreal(out.norm()))
+    assert not torch.all(torch.isnan(out))
+    assert not torch.all(torch.isinf(out))
+    assert not torch.all(torch.isnan(out.norm()))
+    assert not torch.all(torch.isinf(out.norm()))
+    print("PASSED NUMERICAL STABILITY TEST")
 
 def test_variable_resolution():
     pass
 
 def test_variable_batch_sizes():
-    pass
+    for batch_size in [1, 2, 4, 8, 16, 32]:
+        model = AutoregressiveVideoTransformer(model_args).to(device)
+        image_input = torch.randint(
+            0, model_args.num_embeddings, (batch_size, T_frames, H, W), dtype=torch.int64
+        ).to(device)
+        image_mask = torch.randint(0, 2, (batch_size, T_frames*H*W), dtype=torch.bool).to(device)
+        text_input = torch.randn(batch_size, T_tokens, d_model).to(device)
+        text_mask = torch.randint(0, 2, (batch_size, T_tokens), dtype=torch.bool).to(device)
+        out = model(image_input, text_input, False, image_mask, text_mask)
+        assert torch.all(torch.isfinite(out))
+        assert torch.all(torch.isreal(out))
+        assert torch.all(torch.isfinite(out.norm()))
+        assert torch.all(torch.isreal(out.norm()))
+        assert not torch.all(torch.isnan(out))
+        assert not torch.all(torch.isinf(out))
+        assert not torch.all(torch.isnan(out.norm()))
+        assert not torch.all(torch.isinf(out.norm()))
+    print("PASSED VARIABLE BATCH SIZES TEST")
+
 
 def test_variable_input_frames():
     pass
