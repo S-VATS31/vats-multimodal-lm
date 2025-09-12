@@ -106,8 +106,8 @@ class FactorizedCrossAttention(nn.Module):
             value = value.repeat_interleave(num_spatial_patches, dim=0)
             if padding_mask is not None:
                 padding_mask = padding_mask.repeat_interleave(num_spatial_patches, dim=0)
-            else:
-                raise ValueError(f"expected 'spatial' or 'temporal', got {attn_mode}")
+        else:
+            raise ValueError(f"expected 'spatial' or 'temporal', got {attn_mode}")
 
         # Handle padding mask
         if padding_mask is not None and key.size(2) != 0:

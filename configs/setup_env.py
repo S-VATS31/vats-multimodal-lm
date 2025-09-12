@@ -7,7 +7,7 @@ import torch
 
 # Set up device and dtype
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+dtype = torch.float32
 
 # Import Flash attention 2 function
 try:
