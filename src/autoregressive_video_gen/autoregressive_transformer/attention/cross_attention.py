@@ -94,6 +94,8 @@ class FactorizedCrossAttention(nn.Module):
         ), f"expected {self.d_model}, got {x.size(-1)}"
 
         # Ensure dim 0 is equal for q, k, v, padding mask
+        if query.numel() == 0 and key.numel() == 0 and value.numel() == 0:
+            return torch.empty_like(x)
         if attn_mode == "spatial":
             key = key.repeat_interleave(T_frames, dim=0)
             value = value.repeat_interleave(T_frames, dim=0)
@@ -104,11 +106,11 @@ class FactorizedCrossAttention(nn.Module):
             value = value.repeat_interleave(num_spatial_patches, dim=0)
             if padding_mask is not None:
                 padding_mask = padding_mask.repeat_interleave(num_spatial_patches, dim=0)
-        else:
-            raise ValueError(f"expected 'spatial' or 'temporal', got {attn_mode}")
+            else:
+                raise ValueError(f"expected 'spatial' or 'temporal', got {attn_mode}")
 
         # Handle padding mask
-        if padding_mask is not None:
+        if padding_mask is not None and key.size(2) != 0:
             assert (
                 padding_mask.shape == (key.size(0), key.size(2)) # [B, T_k]
             ), f"expected {(key.size(0), key.size(2))}, got {padding_mask.shape}"
@@ -259,11 +261,26 @@ class FactorizedCrossAttention(nn.Module):
         Returns:
             Tuple:
                 - torch.Tensor: Query tensor of shape [B*T, H*W, num_heads, head_dim].
-                - torch.Tensor: Key tensor of shape [B*T, H*W, num_heads or 1, head_dim].
-                - torch.Tensor: Value tensor of shape [B*T, H*W, num_heads or 1, head_dim].
+                - torch.Tensor: Key tensor of shape [B, T_tokens, num_heads or 1, head_dim].
+                - torch.Tensor: Value tensor of shape [B, T_tokens, num_heads or 1, head_dim].
         """
         B, T_frames, num_spatial_patches, _ = x.shape
         _, T_tokens, _ = text_embeddings.shape
+
+        # Handle 0 input frames or tokens
+        if T_frames == 0 or T_tokens == 0:
+            if self.query_groups != 1:
+                return (
+                    torch.empty(B*0, num_spatial_patches, self.num_heads, self.head_dim),
+                    torch.empty(B, 0, self.num_heads, self.head_dim),
+                    torch.empty(B, 0, self.num_heads, self.head_dim)
+                )
+            else:
+                return (
+                    torch.empty(B*0, num_spatial_patches, self.num_heads, self.head_dim),
+                    torch.empty(B, 0, 1, self.head_dim),
+                    torch.empty(B, 0, 1, self.head_dim)
+                )
 
         assert (
             x.size(0) == text_embeddings.size(0)
@@ -351,6 +368,21 @@ class FactorizedCrossAttention(nn.Module):
         """
         B, T_frames, num_spatial_patches, _ = x.shape
         _, T_tokens, _ = text_embeddings.shape
+
+        # Handle 0 input frames or tokens
+        if T_frames == 0 or T_tokens == 0:
+            if self.query_groups != 1:
+                return (
+                    torch.empty(B*num_spatial_patches, 0 , self.num_heads, self.head_dim),
+                    torch.empty(B, 0, self.num_heads, self.head_dim),
+                    torch.empty(B, 0, self.num_heads, self.head_dim)
+                )
+            else:
+                return (
+                    torch.empty(B*num_spatial_patches, 0, self.num_heads, self.head_dim),
+                    torch.empty(B, 0, 1, self.head_dim),
+                    torch.empty(B, 0, 1, self.head_dim)
+                )
 
         assert (
             x.size(0) == text_embeddings.size(0)
@@ -592,13 +624,8 @@ def test_attention():
     x_out = cross_attn(
         x, text_embeddings, False, True, padding_mask
     )
-    loss = x_out.sum()
-    loss.backward()
-    for name, param in cross_attn.named_parameters():
-        print(f"{name}: {param.grad}")
     return x_out
 
 if __name__ == "__main__":
     x = test_attention()
     print(x.shape)
-
