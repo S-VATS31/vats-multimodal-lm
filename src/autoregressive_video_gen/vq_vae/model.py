@@ -4,6 +4,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.amp import autocast
 
 from src.autoregressive_video_gen.vq_vae.encoder import Encoder3D
@@ -48,9 +49,11 @@ class VQVAE3D(nn.Module):
         """
         with autocast(device_type=device.type, dtype=dtype):
             z = self.encoder(x)
-            z_q, loss, encoding_indices = self.quantizer(z)
+            z_q, vq_loss, encoding_indices = self.quantizer(z)
             x_reconstructed = self.decoder(z_q)
-            return x_reconstructed, loss, encoding_indices
+            recon_loss = F.mse_loss(x_reconstructed, x)
+            total_loss = recon_loss + vq_loss
+            return x_reconstructed, total_loss, encoding_indices
         
 def test_model():
     model_args = ModelArgs()
