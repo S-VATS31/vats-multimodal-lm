@@ -1,4 +1,4 @@
-from configs.setup_env import device, dtype
+from configs.setup_env import device
 
 import torch
 

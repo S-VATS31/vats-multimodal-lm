@@ -689,9 +689,9 @@ def test_attention():
         head_dim=d_model//num_heads,
         num_layers=4
     )
-    B, T = 4, 16
-    x = torch.randn(B, T, d_model).to(device)
-    padding_mask = torch.randint(0, 2, (B, T), dtype=torch.bool).to(device)
+    B, H, W = 4, 32, 32
+    x = torch.randn(B, H*W, d_model).to(device)
+    padding_mask = torch.randint(0, 2, (B, H*W), dtype=torch.bool).to(device)
     x_out = attention(
         x,
         use_mqa=False,
