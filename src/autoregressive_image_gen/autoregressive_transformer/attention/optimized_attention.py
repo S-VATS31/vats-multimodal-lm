@@ -244,14 +244,14 @@ class CausalSelfAttention(nn.Module):
             # True -> attend, False -> pad (don't attend)
             padding_mask = padding_mask.bool()
             padding_mask = padding_mask[:, None, None, :] # [B, 1, 1, T]
-            padding_mask = padding_mask.expand(query.size(0), 1, query.size(2), key.size(2)) # [B, 1, T_q, T_k]
+            attn_mask = padding_mask.expand(query.size(0), 1, query.size(2), key.size(2)) # [B, 1, T_q, T_k]
 
             assert (
-                padding_mask.dtype == torch.bool
-            ), f"expected: bool, got {padding_mask.dtype}"
+                attn_mask.dtype == torch.bool
+            ), f"expected: bool, got {attn_mask.dtype}"
             assert (
-                padding_mask.shape == (query.size(0), 1, query.size(2), key.size(2))
-            ), f"expected: {(query.size(0), 1, query.size(2), key.size(2))}, got {padding_mask.shape}"
+                attn_mask.shape == (query.size(0), 1, query.size(2), key.size(2))
+            ), f"expected: {(query.size(0), 1, query.size(2), key.size(2))}, got {attn_mask.shape}"
 
             # Handle causal masking
             if causal:
@@ -276,11 +276,11 @@ class CausalSelfAttention(nn.Module):
                 causal_mask = causal_mask[None, None, ...] # [1, 1, T_q, T_k]
 
                 assert (
-                    causal_mask.dim() == padding_mask.dim()
-                ), f"expected 4, 4 got {causal_mask.dim()}, {padding_mask.dim()}"
+                    causal_mask.dim() == attn_mask.dim()
+                ), f"expected 4, 4 got {causal_mask.dim()}, {attn_mask.dim()}"
 
                 # Aggregate into global mask
-                attn_mask = padding_mask & causal_mask
+                attn_mask = attn_mask & causal_mask
 
             attn_mask = attn_mask.expand(
                 query.size(0), self.num_heads, query.size(2), key.size(2)
