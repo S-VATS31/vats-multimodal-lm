@@ -10,7 +10,7 @@ from torch.utils.checkpoint import checkpoint
 from src.rms_norm import RMSNorm
 from src.ffn_block import FFNBlock
 from src.optimized_attention import KVCache
-from configs.autoregressive_image_gen.autoregressive_transformer.model_args.model_args_xlarge import ModelArgs
+from configs.autoregressive_image_gen.autoregressive_transformer.model_args.model_args_xsmall import ModelArgs
 from src.autoregressive_image_gen.autoregressive_transformer.attention.cross_attention import CrossAttentionBlock
 from src.autoregressive_image_gen.autoregressive_transformer.attention.optimized_attention import CausalSelfAttentionBlock
 
@@ -151,6 +151,11 @@ class AutoregressiveImageTransformer(nn.Module):
 
         self.model_args = model_args
 
+        # Set up embedding projection
+        self.embedding_proj = nn.Embedding(
+            model_args.num_embeddings, model_args.d_model
+        ).to(device)
+
         # Set up dropout
         self.dropout = nn.Dropout(p=model_args.dropout).to(device)
 
@@ -204,7 +209,7 @@ class AutoregressiveImageTransformer(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
+        input_ids: torch.LongTensor,
         text_embeddings: torch.Tensor,
         use_cache: bool,
         causal_padding_mask: Optional[torch.Tensor] = None,
@@ -213,30 +218,56 @@ class AutoregressiveImageTransformer(nn.Module):
         """Forward pass of autoregressive image generation transformer.
         
         Args:
-            x (torch.Tensor): Image tokens of shape [B, H*W, d_model].
-            text_embeddings (torch.Tensor): Text tokens of shape [B, T, d_model].
+            input_ids (torch.LongTensor): Image tokens of shape [B, H, W].
+            text_embeddings (torch.Tensor): Text tokens of shape [B, T_tokens, d_model].
             causal_padding_mask (Optional[torch.Tensor]): Causal padding tensor of shape [B, H*W].
-            cross_padding_mask (Optional[torch.Tensor]): Encoder padding tensor of shape [B, T_k].
+            cross_padding_mask (Optional[torch.Tensor]): Encoder padding tensor of shape [B, T_tokens].
             use_cache (bool): Whether to use KV caching or not.
         
         Returns:
-            torch.Tensor: Output tensor of shape [B, H*W, d_model].
+            torch.Tensor: Output tensor of shape [B, H, W, d_model].
         """
-        assert x.dim() == 3, f"expected 3 dims, got {x.dim()} dims"
+        assert input_ids.dim() == 3, f"expected 3 dims, got {input_ids.dim()} dims"
         assert text_embeddings.dim() == 3, f"expected 3 dims, got {text_embeddings.dim()} dims"
-        assert causal_padding_mask.dim() == 2, f"expected 2 dims, got {causal_padding_mask.dim()} dims"
-        assert cross_padding_mask.dim() == 2, f"expected 2 dims, got {cross_padding_mask.dim()} dims"
-        assert x.size(1) == causal_padding_mask.size(1), (
-            f"expected x.size(1) == causal_padding_mask.size(1), "
-            f"got {x.size(1)}, {causal_padding_mask.size(1)}, respectively"
-        )
-        assert text_embeddings.size(1) == cross_padding_mask.size(1), (
-            f"expected text_embeddings.size(1) == cross_padding_mask.size(1), "
-            f"got {text_embeddings.size(1)}, {cross_padding_mask.size(1)} respectively"
+        if causal_padding_mask is not None:
+            assert (
+                causal_padding_mask.dim() == 2
+            ), f"expected 2 dims, got {causal_padding_mask.dim()} dims"
+            assert (
+                causal_padding_mask.shape == (
+                    input_ids.size(0), input_ids.size(1)*input_ids.size(2)
+                )
+            ), f"expected {
+                (input_ids.size(0), input_ids.size(1)*input_ids.size(2))
+            }, got {causal_padding_mask.shape}"
+        if cross_padding_mask is not None:
+            assert (
+                cross_padding_mask.dim() == 2
+            ), f"expected 2 dims, got {cross_padding_mask.dim()} dims"
+            assert (
+                cross_padding_mask.shape == (text_embeddings.size(0), text_embeddings.size(1))
+            ), f"expected {
+                (text_embeddings.size(0), text_embeddings.size(1))
+            }, got {cross_padding_mask.shape}"
+
+        # Ensure input_ids are int64 for nn.Embedding
+        if input_ids.dtype != torch.int64:
+            input_ids = input_ids.to(torch.int64)
+        B, H, W = input_ids.shape
+
+        assert input_ids.dtype == torch.int64, f"expected int64, got {input_ids.dtype}"
+
+        # Project to d_model
+        x = self.dropout(self.embedding_proj(input_ids)) # [B, H, W, d_model]
+        assert (
+            x.shape == (B, H, W, self.model_args.d_model)
         )
 
-        # Apply final dropout
-        x = self.dropout(x) # [B, H*W, d_model]
+        # Reshape to [B, H*W, d_model]
+        x = x.view(B, H*W, -1)
+        assert (
+            x.shape == (B, H*W, self.model_args.d_model)
+        ), f"expected {(B, H*W, self.model_args.d_model)}, got {x.shape}"
 
         # Loop through transformer blocks
         for layer_idx, layer in enumerate(self.layers):
@@ -276,7 +307,7 @@ class AutoregressiveImageTransformer(nn.Module):
         # Apply final RMSNorm
         x = self.rms_norm(x)
 
-        return x # [B, H*W, d_model]
+        return x.view(B, H, W, -1) # [B, H*W, d_model]
 
 def test_transformer_block():
     d_model, num_heads, query_groups, rope_theta = 512, 32, 8, 10000.0
@@ -296,7 +327,7 @@ def test_transformer_block():
         head_dim=d_model//num_heads,
         num_layers=10
     )
-    B, H, W = 1, 72, 144
+    B, H, W = 1, 144, 144
     T_q = H*W
     T_k = 16
     x = torch.randn(B, T_q, d_model).to(device)
@@ -324,33 +355,31 @@ def test_transformer_block():
 
     return x_out
 
-def test_model_forward():
+def test_transformer_forward(log_grads:bool):
     model_args = ModelArgs()
     model = AutoregressiveImageTransformer(model_args).to(device)
-    B, H, W, d_model = 1, 12, 12, model_args.d_model
-    T_q = H*W
-    T_k = 4
-    x = torch.randn(B, T_q, d_model).to(device)
-    text_embeddings = torch.randn(B, T_k, d_model).to(device)
-    image_padding_mask = torch.randint(
-        0, 2, (B, T_q), dtype=torch.bool
+    B, H, W = 2, 16, 16
+    T_tokens = 9
+    input_ids = torch.randint(
+        0, model_args.num_embeddings, (B, H, W), dtype=torch.int64
     ).to(device)
-    text_padding_mask = torch.randint(
-        0, 2, (B, T_k), dtype=torch.bool
+    text_embeddings = torch.randn(B, T_tokens, model_args.d_model).to(device)
+    image_mask = torch.randint(
+        0, 2, (B, H*W), dtype=torch.bool
     ).to(device)
-    x_out = model(
-        x,
-        text_embeddings=text_embeddings,
-        use_cache=True,
-        causal_padding_mask=image_padding_mask,
-        cross_padding_mask=text_padding_mask
+    text_mask = torch.randint(
+        0, 2, (B, T_tokens), dtype=torch.bool
+    ).to(device)
+    out = model(
+        input_ids, text_embeddings, True, image_mask, text_mask
     )
-    loss = x_out.sum()
-    loss.backward()
-    for name, param in model.named_parameters():
-        print(f"{name}: {param.grad}")
-    return x_out
+    if log_grads:
+        loss = out.sum()
+        loss.backward()
+        for name, param in model.named_parameters():
+            print(f"{name}: {param.grad}")
+    return out
 
 if __name__ == "__main__":
-    x, params = test_model_forward()
-    print(x.shape) # [1, 144, d_model]
+    out = test_transformer_forward(True)
+    print(out.shape) # [B, H, W, d_model] -> [2, 16, 16, d_model]

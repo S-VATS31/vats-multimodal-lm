@@ -7,8 +7,10 @@ torch.manual_seed(42)
 from src.autoregressive_image_gen.autoregressive_transformer.model import AutoregressiveImageTransformer
 from configs.autoregressive_image_gen.autoregressive_transformer.model_args.model_args_xsmall import ModelArgs
 
+model_args = ModelArgs()
+
 def setup():
-    pass
+    model = AutoregressiveImageTransformer(model_args).to(device)
 
 def test_output_shape():
     pass

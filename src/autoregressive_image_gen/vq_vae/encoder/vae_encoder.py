@@ -74,11 +74,10 @@ class VQVAEEncoder(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, C_in, H, W].
 
         Returns:
-            torch.Tensor: Output tensor of shape [B, H*W, d_model].
+            torch.Tensor: Output tensor of shape [B, H, W, d_model].
         """
         with autocast(device_type=device.type, dtype=dtype):
             assert x.dim() == 4, f"expected 4 dims, got {x.dim()} dims"
-            B = x.size(0)
 
             # Pass through blocks; shape: [B, d_model, H, W]
             x = self.activation(self.batch_norm1(self.conv1(x)))
@@ -88,14 +87,10 @@ class VQVAEEncoder(nn.Module):
             assert x.dim() == 4, f"expected 4 dims, got {x.dim()} dims"
             assert x.size(1) == self.d_model, f"expected {self.d_model}, got {x.size(1)}"
 
-            # Reshape to [B, H*W, d_model]
-            x = (
-                x.view(B, self.d_model, -1) # [B, d_model, H*W]
-                .transpose(1, 2) # [B, H*W, d_model]
-                .contiguous()
-            )
+            # Reshape to [B, H, W, d_model]
+            x = x.permute(0, -2, -1, 1).contiguous()
 
-            assert x.dim() == 3, f"expected 3 dims, got {x.dim()} dims"
+            assert x.dim() == 4, f"expected 4 dims, got {x.dim()} dims"
             assert x.size(-1) == self.d_model, f"expected {self.d_model}, got {x.size(-1)}"
 
             return x
@@ -117,4 +112,4 @@ if __name__ == "__main__":
     # W' = floor_div((W+2p-k) / s) + 1
     # for all blocks
     # H' and W' should be 36 after calculations
-    print(x.shape) # [1, 36*36, 512]
+    print(x.shape) # [1, 36, 36, 512]
