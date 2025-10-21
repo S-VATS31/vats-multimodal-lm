@@ -25,8 +25,7 @@ def save_checkpoint(
     model: nn.Module,
     optimizer: Optimizer,
     scheduler: LambdaLR,
-    epoch: int,
-    step: int,
+    tokens_seen: int,
     loss: float,
     training_args: TrainingArgs,
     model_args: ModelArgs,
@@ -40,8 +39,7 @@ def save_checkpoint(
         model (nn.Module): Transformer architecture.
         optimizer (Optimizer): PyTorch optimizer.
         scheduler: PyTorch scheduler.
-        epoch (int): Current epoch to save checkpoint to.
-        step (int): Current step to save checkpoint to.
+        tokens_seen (int): Number of tokens seen so far.
         loss (float): Current loss to save checkpoint to.
         training_args (TrainingArgs): Training hyperparameters.
         model_args (ModelArgs): Model hyperparameters.
@@ -56,8 +54,7 @@ def save_checkpoint(
     try:
         # Create checkpoint data
         checkpoint_data = {
-            'epoch': epoch,
-            'step': step,
+            'tokens_seen': tokens_seen,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
@@ -71,7 +68,7 @@ def save_checkpoint(
             checkpoint_data['scaler_state_dict'] = scaler.state_dict()
         
         # Create filename
-        filename = "best_model.pt" if is_best else f"checkpoint_step_{step}_epoch{epoch}.pt"
+        filename = "best_model.pt" if is_best else f"checkpoint_tokens_seen_{tokens_seen}.pt"
         
         # Load checkpoint data to filename
         save_path = checkpoints_dir / filename
@@ -87,25 +84,24 @@ def save_checkpoint(
 def load_checkpoint(
     filename: str,
     model: nn.Module,
-    optimizer,
-    scheduler,
+    optimizer: Optimizer,
+    scheduler: LambdaLR,
     scaler: Optional[GradScaler] = None
-) -> Dict[str, Union[int, float]]:
+) -> Dict[str, Union[int, float, dict]]:
     """Load checkpoint from saved .pt file.
     
     Args:
         filename (str): Filename where checkpoint is saved.
         model (nn.Module): Transformer architecture.
-        optimizer: PyTorch optimizer.
-        scheduler: PyTorch scheduler.
+        optimizer (Optimizer): PyTorch optimizer.
+        scheduler (LambdaLR): PyTorch scheduler.
         scaler (Optional[GradScaler]): Gradient scaling for bf16/fp16 gradients.
-        device (torch.device): Accelerator at use.
 
     Returns:
-        Dict[str, Union[int, float]]: State dict returning current step, epoch, and loss.
-            - int: Current epoch.
-            - int: Current step.
-            - float: Current loss.
+        Dict[str, Union[int, float, dict]]:
+            - Dict[str, int]: Number of tokens seen so far.
+            - Dict[str, float]: Loss based on training.
+            - Dict[str, dict]: Training arguments and model arguments.
     """
     try:
         # Load checkpoint
@@ -123,9 +119,10 @@ def load_checkpoint(
         checkpoint_logger.info(f"Succesfully loaded checkpoint from {filename}")
         
         return {
-            'epoch': checkpoint['epoch'],
-            'step': checkpoint['step'],
+            'tokens_seen': checkpoint['tokens_seen'],
             'loss': checkpoint['loss'],
+            'training_args': checkpoint['training_args'],
+            'model_args': checkpoint['model_args'],
         }
         
     except Exception as e:

@@ -208,11 +208,18 @@ class VideoTransformer(nn.Module):
             if hasattr(layer.gated_ffn_block.gated_ffn, 'w2'):
                 layer.gated_ffn_block.gated_ffn.w2.weight.data.mul_(scale_factor)
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, 
+        x: torch.Tensor,
+        use_padding: bool = True,
+        *,
+        return_grid_size: bool = False # only for debugging
+    ) -> torch.Tensor:
         """Perform forward pass of the entire video transformer.
         
         Args:
             x (torch.Tensor): Input tensor of shape [B, C, T, H, W].
+            use_padding (bool): Whether to use padding or not.
 
         Returns:
             torch.Tensor: Returns logits of shape [B, num_classses].
@@ -227,9 +234,11 @@ class VideoTransformer(nn.Module):
             x.dim() == 5
         ), f"x must be a 5 dimensional tensor, got {x.dim()} dimensions"
 
-        # Apply patch embeddings and dropout, get processed dimensions 
-        x, padding_mask, grid_size = self.patch_embeddings(x)
-        x = self.dropout(x) # [B, T, H*W, d_model]
+        # Apply patch embeddings and dropout, get processed dimensions
+        x, padding_mask, grid_size = self.patch_embeddings(x, use_padding=use_padding)
+
+        if not use_padding: 
+            assert padding_mask is None
 
         # Grid size contains 'real' T, H, W values after padding/truncating
         new_T, new_H, new_W = grid_size
@@ -240,12 +249,13 @@ class VideoTransformer(nn.Module):
             f"x must have shape of {(B, new_T, new_H*new_W, self.model_args.d_model)}, "
             f"got {x.shape}"
         )
-        assert (
-            padding_mask.shape == (B, new_T*new_H*new_W)
-        ), (
-            f"padding_mask must have shape of {(B, new_T*new_H*new_W)}, "
-            f"got {padding_mask.shape}"
-        )
+        if padding_mask is not None:
+            assert (
+                padding_mask.shape == (B, new_T*new_H*new_W)
+            ), (
+                f"padding_mask must have shape of {(B, new_T*new_H*new_W)}, "
+                f"got {padding_mask.shape}"
+            )
 
         # Stack transformer blocks
         for layer in self.layers:
@@ -262,7 +272,7 @@ class VideoTransformer(nn.Module):
                 )
             else:
                 x = layer(
-                    x=x,
+                    x,
                     grid_size=grid_size,
                     use_mqa=self.model_args.use_mqa,
                     use_qk_norm=self.model_args.use_qk_norm,
@@ -276,7 +286,7 @@ class VideoTransformer(nn.Module):
             f"x must have shape of {(B, new_T, new_H*new_W, self.model_args.d_model)}, "
             f"got {x.shape}"
         )
-                
+
         # Apply final RMSNorm
         x = self.rms_norm(x)
 
@@ -296,11 +306,14 @@ class VideoTransformer(nn.Module):
             f"x must have shape of {(B, new_T*new_H*new_W, self.model_args.d_model)}, "
             f"got {x.shape}"
         )
-
-        return x
         
+        # Return grid size if requested
+        if return_grid_size:
+            return x, grid_size
+        
+        return x
 
-def test_transformer_block(use_pad: bool):
+def test_transformer_block(use_pad:bool):
     d_model, num_heads, query_groups, rope_theta = 744, 124, 2, 10000.0
     d_ffn, dropout, eps, = 4*d_model, 0.15, 1e-7
     patch_size = (2, 32, 32)
@@ -334,16 +347,13 @@ def test_entire_forward():
     model = VideoTransformer(model_args).to(device)
     B, C, T, H, W = 1, 3, 11, 144, 144
     x = torch.randn(B, C, T, H, W).to(device)
-    x_out = model(x)
-    return x_out
-
-# if __name__ == "__main__":
-#     x = test_transformer_block(use_pad=True)
-#     print(x.shape) # [1, 1, 16, 744]
+    x_out, grid_size = model(x, True, return_grid_size=True)
+    return x_out, grid_size
 
 if __name__ == "__main__":
-    x = test_entire_forward()
+    x, grid_size = test_entire_forward()
     # [1, new_T*new_H*new_W, d_model]
     # [1, 4*16*16, 2112]
     # [1, 784, 2112]
     print(x.shape)
+    print(grid_size)

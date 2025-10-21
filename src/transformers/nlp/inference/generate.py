@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from torch.amp import autocast
+import time
 
 from src.optimized_attention import KVCache
 from src.transformers.nlp.model import AutoregressiveTextTransformer
@@ -68,6 +69,13 @@ class AutoregressiveTokenGenerator:
         # Create attention mask if not provided
         if attention_mask is None:
             attention_mask = (input_ids != pad_token_id)
+        else:
+            assert attention_mask.shape == input_ids.shape
+
+        if attention_mask.dtype != torch.bool:
+            attention_mask = attention_mask.bool()
+
+        assert attention_mask.dtype == torch.bool
 
         # Check if initial sequence length plus max_new_tokens exceeds model limit
         max_total_length = min(self.model_args.max_seq_len, T + max_new_tokens)
@@ -134,21 +142,24 @@ class AutoregressiveTokenGenerator:
                 # Get logits for the last position
                 next_token_logits = logits[:, -1, :] # [B, V]
 
-                # Apply repetition penatly
-                if repetition_penalty is not None and repetition_penalty != 1.0:
-                    logits_B, vocab_size = next_token_logits.size()
-                    for batch_idx in range(logits_B):
-                        # Get unique tokens
-                        unique_tokens = torch.unique(generated_ids[batch_idx])
-                        # Apply repetition penalty
-                        for token_id in unique_tokens:
-                            if 0 <= token_id <= vocab_size:
-                                # Discourage repeating of token
-                                if next_token_logits[batch_idx, token_id] > 0:
-                                    next_token_logits[batch_idx, token_id] /= repetition_penalty
-                                # Model confident in logit, increase probability
-                                else:
-                                    next_token_logits[batch_idx, token_id] *= repetition_penalty
+                # Apply repetition penalty
+                if repetition_penalty is not None:
+                    if repetition_penalty > 0:
+                        logits_B, vocab_size = next_token_logits.size()
+                        for batch_idx in range(logits_B):
+                            # Get unique tokens
+                            unique_tokens = torch.unique(generated_ids[batch_idx])
+                            # Apply repetition penalty
+                            for token_id in unique_tokens:
+                                if 0 <= token_id <= vocab_size:
+                                    # Discourage repeating of token
+                                    if next_token_logits[batch_idx, token_id] > 0:
+                                        next_token_logits[batch_idx, token_id] /= repetition_penalty
+                                    # Model confident in logit, increase probability
+                                    else:
+                                        next_token_logits[batch_idx, token_id] *= repetition_penalty
+                    else:
+                        raise ValueError(f"expected repetition_penalty>0, got {repetition_penalty}")
 
                 # Apply temperature
                 if temperature is not None:
@@ -235,6 +246,7 @@ class AutoregressiveTokenGenerator:
         prompt: str,
         generation_args: GenerationArgs,
         tokenizer,
+        attention_mask: Optional[torch.Tensor] = None
     ) -> str:
         """Generate tokens using a HuggingFace tokenizer.
         
@@ -249,6 +261,9 @@ class AutoregressiveTokenGenerator:
         # Handle empty input prompts
         if not prompt or not prompt.strip():
             return "Please enter a valid prompt."
+        
+        if generation_args.max_new_tokens <= 0:
+            return prompt
         
         input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
         
@@ -265,7 +280,7 @@ class AutoregressiveTokenGenerator:
                     do_sample=generation_args.do_sample,
                     pad_token_id=generation_args.pad_token_id,
                     eos_token_id=generation_args.eos_token_id,
-                    attention_mask=None,
+                    attention_mask=attention_mask,
                     use_cache=generation_args.use_cache
                 )
 
@@ -280,9 +295,10 @@ class AutoregressiveTokenGenerator:
             )
         return generated_text
 
-def main():
+def test_kv_cache_speed():
     from transformers import AutoTokenizer
-    
+    import time
+
     # Initialize model and generation arguments
     model_args = ModelArgs()
     generation_args = GenerationArgs()
@@ -302,13 +318,31 @@ def main():
     # Create generator
     generator = AutoregressiveTokenGenerator(model_args)
 
-    # Input prompt
-    prompt = input(f"Enter prompt: ")
+    prompt = "hello world" * 10
+    print(prompt)
 
-    # Generate and print the output
-    output = generator.generate_tokens(prompt, generation_args, tokenizer)
-    print("--- Generated Text ---")
-    print(output)
+    # --- Test with KV cache ---
+    generation_args.use_cache = True
+    start_time = time.time()
+    out_cache = generator.generate_tokens(
+        prompt=prompt, 
+        generation_args=generation_args,
+        tokenizer=tokenizer
+    )
+    time_cache = time.time() - start_time
+    print(f"Time with KV cache: {time_cache:.4f}s")
 
-if __name__ == "__main__":
-    main()
+    # --- Test without KV cache ---
+    generation_args.use_cache = False
+    start_time = time.time()
+    out_no_cache = generator.generate_tokens(
+        prompt=prompt, 
+        generation_args=generation_args,
+        tokenizer=tokenizer
+    )
+    time_no_cache = time.time() - start_time
+    print(f"Time without KV cache: {time_no_cache:.4f}s")
+
+    # Optional: verify outputs
+    print("Generated output (with cache):", out_cache)
+    print("Generated output (no cache):", out_no_cache)

@@ -195,7 +195,7 @@ class ImageEncoderTransformer(nn.Module):
             x (torch.Tensor): Input tensor of shape [B, C, H, W].
 
         Returns:
-            torch.Tensor: Output tensor with same shape.
+            torch.Tensor: Output tensor with shape [B, H*W, d_model].
         """
         assert (
             x.dim() == 4

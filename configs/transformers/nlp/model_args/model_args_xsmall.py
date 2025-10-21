@@ -16,8 +16,8 @@ class ModelArgs(PostInitMixin):
     rms_norm_eps: float = 1e-7
     left_window: int = 128
     right_window: int = 0
-    vocab_size: int = 50257
-    max_seq_len: int = 512
+    vocab_size: int = 512
+    max_seq_len: int = 128
     tie_weights: bool = True
     max_batch_size: int = 2048
     gradient_checkpointing: bool = True

@@ -4,9 +4,8 @@ from dataclasses import dataclass
 @dataclass
 class TrainingArgs:
     """Dataclass containing model training arguments."""
-    learning_rate: float = 2e-4
-    epochs: int = 3
-    batch_size: int = 256
+    learning_rate: float = 6e-4
+    batch_size: int = 32
     epsilon: float = 1e-6
     clip_grad_norm: float = 1.0
     weight_decay: float = 5e-4
@@ -21,12 +20,11 @@ class TrainingArgs:
     persistent_workers: bool = True
     drop_last: bool = True
     grad_accum_steps: int = 4
-    
-    logging_steps: int = 100     # TODO: check if being used or deprecate
-    eval_steps: int = 500        # TODO: check if being used or deprecate
-    save_steps: int = 500        # TODO: check if being used or deprecate
-    max_eval_batches: int = 250  # TODO: check if being used or deprecate
-
-    save_freq: int = 10_000_000_000
+    logging_tokens_freq: int = 1_000_000_000
+    logging_steps: int = 100
+    eval_steps: int = 500
+    save_steps: int = 500
+    max_eval_batches: int = 250
     max_skipped_steps: int = 1000
-    max_train_tokens: int = 500_000_000_000
+    max_train_tokens: int = 20_000_000_000
+    clear_cache_freq: int = 500_000_000

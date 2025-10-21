@@ -209,7 +209,7 @@ class AutoregressiveImageTransformer(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
+        encoding_indices: torch.LongTensor,
         text_embeddings: torch.Tensor,
         use_cache: bool,
         causal_padding_mask: Optional[torch.Tensor] = None,
@@ -218,7 +218,7 @@ class AutoregressiveImageTransformer(nn.Module):
         """Forward pass of autoregressive image generation transformer.
         
         Args:
-            input_ids (torch.LongTensor): Image tokens of shape [B, H, W].
+            encoding_indices (torch.LongTensor): Image tokens of shape [B, H, W].
             text_embeddings (torch.Tensor): Text tokens of shape [B, T_tokens, d_model].
             causal_padding_mask (Optional[torch.Tensor]): Causal padding tensor of shape [B, H*W].
             cross_padding_mask (Optional[torch.Tensor]): Encoder padding tensor of shape [B, T_tokens].
@@ -227,7 +227,7 @@ class AutoregressiveImageTransformer(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape [B, H, W, d_model].
         """
-        assert input_ids.dim() == 3, f"expected 3 dims, got {input_ids.dim()} dims"
+        assert encoding_indices.dim() == 3, f"expected 3 dims, got {encoding_indices.dim()} dims"
         assert text_embeddings.dim() == 3, f"expected 3 dims, got {text_embeddings.dim()} dims"
         if causal_padding_mask is not None:
             assert (
@@ -235,30 +235,26 @@ class AutoregressiveImageTransformer(nn.Module):
             ), f"expected 2 dims, got {causal_padding_mask.dim()} dims"
             assert (
                 causal_padding_mask.shape == (
-                    input_ids.size(0), input_ids.size(1)*input_ids.size(2)
+                    encoding_indices.size(0), encoding_indices.size(1)*encoding_indices.size(2)
                 )
-            ), f"expected {
-                (input_ids.size(0), input_ids.size(1)*input_ids.size(2))
-            }, got {causal_padding_mask.shape}"
+            ), f"expected {(encoding_indices.size(0), encoding_indices.size(1)*encoding_indices.size(2))}, got {causal_padding_mask.shape}"
         if cross_padding_mask is not None:
             assert (
                 cross_padding_mask.dim() == 2
             ), f"expected 2 dims, got {cross_padding_mask.dim()} dims"
             assert (
                 cross_padding_mask.shape == (text_embeddings.size(0), text_embeddings.size(1))
-            ), f"expected {
-                (text_embeddings.size(0), text_embeddings.size(1))
-            }, got {cross_padding_mask.shape}"
+            ), f"expected {(text_embeddings.size(0), text_embeddings.size(1))}, got {cross_padding_mask.shape}"
 
-        # Ensure input_ids are int64 for nn.Embedding
-        if input_ids.dtype != torch.int64:
-            input_ids = input_ids.to(torch.int64)
-        B, H, W = input_ids.shape
+        # Ensure encoding_indices are int64 for nn.Embedding
+        if encoding_indices.dtype != torch.int64:
+            encoding_indices = encoding_indices.to(torch.int64)
+        B, H, W = encoding_indices.shape
 
-        assert input_ids.dtype == torch.int64, f"expected int64, got {input_ids.dtype}"
+        assert encoding_indices.dtype == torch.int64, f"expected int64, got {encoding_indices.dtype}"
 
         # Project to d_model
-        x = self.dropout(self.embedding_proj(input_ids)) # [B, H, W, d_model]
+        x = self.dropout(self.embedding_proj(encoding_indices)) # [B, H, W, d_model]
         assert (
             x.shape == (B, H, W, self.model_args.d_model)
         )
@@ -307,7 +303,7 @@ class AutoregressiveImageTransformer(nn.Module):
         # Apply final RMSNorm
         x = self.rms_norm(x)
 
-        return x.view(B, H, W, -1) # [B, H*W, d_model]
+        return x.view(B, H, W, -1) # [B, H, W, d_model]
 
 def test_transformer_block():
     d_model, num_heads, query_groups, rope_theta = 512, 32, 8, 10000.0

@@ -15,12 +15,11 @@ def plot_metrics(
         train_perplexities (List[float]): List of training perplexities.
         val_perplexities (List[float]): List of validation perplexities.
     """
-    epochs = range(1, len(train_lm_losses) + 1)
     plt.figure(figsize=(12, 8))
 
     # Training Loss
     plt.subplot(2, 2, 1)
-    plt.plot(epochs, train_lm_losses, label="Train Loss", color="blue")
+    plt.plot(range(1, len(train_lm_losses) + 1), train_lm_losses, label="Train Loss", color="blue")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.title("Training Loss")
@@ -28,7 +27,7 @@ def plot_metrics(
 
     # Validation Loss
     plt.subplot(2, 2, 2)
-    plt.plot(epochs, val_lm_losses, label="Validation Loss", color="red")
+    plt.plot(range(1, len(val_lm_losses) + 1), val_lm_losses, label="Validation Loss", color="red")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.title("Validation Loss")
@@ -36,7 +35,7 @@ def plot_metrics(
 
     # Training Perplexity
     plt.subplot(2, 2, 3)
-    plt.plot(epochs, train_perplexities, label="Train Perplexity", color="green")
+    plt.plot(range(1, len(train_perplexities) + 1), train_perplexities, label="Train Perplexity", color="green")
     plt.xlabel("Epoch")
     plt.ylabel("Perplexity")
     plt.title("Training Perplexity")
@@ -44,7 +43,7 @@ def plot_metrics(
 
     # Validation Perplexity
     plt.subplot(2, 2, 4)
-    plt.plot(epochs, val_perplexities, label="Validation Perplexity", color="purple")
+    plt.plot(range(1, len(val_perplexities) + 1), val_perplexities, label="Validation Perplexity", color="purple")
     plt.xlabel("Epoch")
     plt.ylabel("Perplexity")
     plt.title("Validation Perplexity")

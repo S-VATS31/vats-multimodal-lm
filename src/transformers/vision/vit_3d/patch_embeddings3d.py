@@ -1,6 +1,5 @@
 from configs.setup_env import device, dtype
 
-import warnings
 from typing import Tuple, Optional
 
 import torch
@@ -45,12 +44,15 @@ class PatchEmbeddings3D(nn.Module):
     def forward(
         self, 
         x: torch.Tensor,
+        use_padding: bool,
         padding_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int, int]]:
         """Perform forward pass of Patch Embeddings 3D layer.
         
         Args:
             x (torch.Tensor): Input tensor of shape [B, C_in, T, H, W].
+            use_padding (bool): Whether to use padding or not.
+            padding_mask (Optional[torch.Tensor]): Padding tensor.
 
         Returns:
             Tuple:
@@ -84,7 +86,7 @@ class PatchEmbeddings3D(nn.Module):
             )
 
             # Construct padding mask
-            if padding_mask is None:
+            if padding_mask is None and use_padding:
                 padding_mask = torch.ones(
                     (B, T), dtype=torch.bool
                 ).to(device) # Assume all frames are valid to start
@@ -98,10 +100,8 @@ class PatchEmbeddings3D(nn.Module):
                 assert (
                     torch.all(padding_mask == True)
                 ), "All positions must start True."
-            
-            assert (
-                padding_mask is not None
-            ), "padding mask should not be None at this point."
+            else:
+                padding_mask = None
 
             # Apply padding or truncation based on input frames, T
             if T < self.max_frames:
@@ -111,27 +111,24 @@ class PatchEmbeddings3D(nn.Module):
                     mode="constant", value=0
                 ) # Pad over end of time dimension to fill video frames
                 # Concatenate frames to pad with padding mask as padded positions
-                pad_frames = torch.zeros((B, frames_to_pad), dtype=padding_mask.dtype).to(padding_mask.device)
-                assert (
-                    torch.all(pad_frames == False)
-                ), "All padding frames must be False."
-                assert (
-                    pad_frames.dtype == padding_mask.dtype
-                ), "pad_frames and padding_mask must have the same dtype"
-                assert (
-                    pad_frames.device.type == padding_mask.device.type
-                ), "pad_frames and padding_mask must have the same device"
+                if padding_mask is not None:
+                    pad_frames = torch.zeros((B, frames_to_pad), dtype=padding_mask.dtype).to(padding_mask.device)
+                    assert (
+                        torch.all(pad_frames == False)
+                    ), "All padding frames must be False."
+                    assert (
+                        pad_frames.dtype == padding_mask.dtype
+                    ), "pad_frames and padding_mask must have the same dtype"
+                    assert (
+                        pad_frames.device.type == padding_mask.device.type
+                    ), "pad_frames and padding_mask must have the same device"
 
-                padding_mask = torch.cat([padding_mask, pad_frames], dim=1) # [B, max_frames]
-                assert (
-                    padding_mask.size(1) == self.max_frames
-                ), f"padding_mask.size(1) must be {self.max_frames}, got {padding_mask.size(1)}"
+                    padding_mask = torch.cat([padding_mask, pad_frames], dim=1) # [B, max_frames]
+                    assert (
+                        padding_mask.size(1) == self.max_frames
+                    ), f"padding_mask.size(1) must be {self.max_frames}, got {padding_mask.size(1)}"
 
             elif T > self.max_frames:
-                warnings.warn(
-                    f"Maximum input frames allowed: {self.max_frames}, received: {T} frames "
-                    f"Trucating {T - self.max_frames} frames."
-                )
                 # [B, C, max_frames, new_H, new_W]
                 x = x[:, :, :self.max_frames] # Truncate over time in frames dimension
                 assert (
@@ -140,10 +137,11 @@ class PatchEmbeddings3D(nn.Module):
                     f"x must have shape of {(B, C, self.max_frames, *self.target_size)}, got {x.shape}"
                 )
 
-                padding_mask = padding_mask[:, :self.max_frames] # [B, max_frames]
-                assert(
-                    padding_mask.shape == (B, self.max_frames)
-                ), f"padding_mask must have shape of {(B, self.max_frames)}, got {padding_mask.shape}"
+                if padding_mask is not None:
+                    padding_mask = padding_mask[:, :self.max_frames] # [B, max_frames]
+                    assert(
+                        padding_mask.shape == (B, self.max_frames)
+                    ), f"padding_mask must have shape of {(B, self.max_frames)}, got {padding_mask.shape}"
 
             # Store processed dimensions for dynamic grid computation later
             processed_T = x.size(2)
@@ -165,33 +163,36 @@ class PatchEmbeddings3D(nn.Module):
             # Convert frame level mask (T) to patch level (N)
             # Instead of checking frame by frame validity, we check patch by patch
             # max_pool1d expects float tensor
-            frame_mask = padding_mask[:, :processed_T].unsqueeze(1).float() # [B, 1, T]
-            assert (
-                frame_mask.size(1) == 1
-            ), f"frame_mask.size(1) must be 1, got {frame_mask.size(1)}"
+            if padding_mask is not None:
+                frame_mask = padding_mask[:, :processed_T].unsqueeze(1).float() # [B, 1, T]
+                assert (
+                    frame_mask.size(1) == 1
+                ), f"frame_mask.size(1) must be 1, got {frame_mask.size(1)}"
 
-            pooled = (
-                F.max_pool1d(frame_mask, kernel_size=pt, stride=pt, ceil_mode=True) # gracefully rounds, no truncation
-                .squeeze(1)
-                .bool()
-            ) # [B, grid_t]
-            assert (
-                pooled.shape == (B, grid_t)
-            ), f"pooled must have shape of {(B, grid_t)}, got {pooled.shape}"
-            assert (
-                pooled.dtype == torch.bool
-            ), f"pooled must be a boolean tensor, got {pooled.dtype}"
+                pooled = (
+                    F.max_pool1d(frame_mask, kernel_size=pt, stride=pt, ceil_mode=True)
+                    .squeeze(1)
+                    .bool()
+                ) # [B, grid_t]
+                assert (
+                    pooled.shape == (B, grid_t)
+                ), f"pooled must have shape of {(B, grid_t)}, got {pooled.shape}"
+                assert (
+                    pooled.dtype == torch.bool
+                ), f"pooled must be a boolean tensor, got {pooled.dtype}"
 
-            # Create patch mask of shape [B, N]
-            patch_mask = (
-                pooled[:, :, None, None] # [B, grid_t, 1, 1]; need singleton dimensions to expand
-                .expand(B, grid_t, grid_h, grid_w) # expand returns non-contiguous tensor
-                .contiguous()
-                .view(B, N)
-            )
-            assert (
-                patch_mask.shape == (B, N)
-            ), f"patch_mask must have shape of {(B, N)}, got {patch_mask.shape}"
+                # Create patch mask of shape [B, N]
+                patch_mask = (
+                    pooled[:, :, None, None] # [B, grid_t, 1, 1]; need singleton dimensions to expand
+                    .expand(B, grid_t, grid_h, grid_w) # expand returns non-contiguous tensor
+                    .contiguous()
+                    .view(B, N)
+                )
+                assert (
+                    patch_mask.shape == (B, N)
+                ), f"patch_mask must have shape of {(B, N)}, got {patch_mask.shape}"
+            else:
+                patch_mask = None
             
             assert(
                 x.size(1) == self.d_model
@@ -218,7 +219,7 @@ def main():
     ).to(device)
     B, T, H, W = 4, 24, 512, 512
     x = torch.randn(B, C_in, T, H, W).to(device)
-    x_out, patch_mask, grid_size = patch_embeddings(x)
+    x_out, patch_mask, grid_size = patch_embeddings(x, use_padding=True)
     return x_out, patch_mask, grid_size
 
 if __name__ == "__main__":

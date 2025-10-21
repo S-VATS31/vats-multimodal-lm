@@ -2,6 +2,8 @@ import os
 
 # Set up environment
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "240"
+os.environ["HF_HUB_DOWNLOAD_RETRIES"] = "10"
 
 import torch
 

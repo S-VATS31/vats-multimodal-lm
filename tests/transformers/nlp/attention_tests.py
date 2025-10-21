@@ -61,8 +61,6 @@ def setup():
 
 attn, B, T, x, padding_mask, x_out, d_model, kv_cache, layer_idx  = setup()
 
-print("--------------------- NLP ATTENTION TESTING ---------------------")
-
 def test_shape():
     assert x.shape == x_out.shape == (B, T, d_model)
     print("PASSED SHAPE TEST")

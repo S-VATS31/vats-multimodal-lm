@@ -14,4 +14,4 @@ class GenerationArgs:
     use_cache: bool = True
     repetition_penalty: float = 1.7
     return_only_new_tokens: bool = True
-    generation_frequency: int = 10_000_000_000
+    generation_frequency: int = 10_000

@@ -42,7 +42,7 @@ def compute_loss(
         # Initialize aux loss as 0 tensor
         return lm_loss, lm_loss, torch.tensor(0.0).to(lm_loss.device)
 
-def compute_perplexity(loss: Union[torch.Tensor, float]) -> Union[torch.Tensor, float]:
+def compute_perplexity(loss: Union[torch.Tensor, float]) -> float:
     """Compute perplexity using the LM loss.
     
     Args:
@@ -51,4 +51,4 @@ def compute_perplexity(loss: Union[torch.Tensor, float]) -> Union[torch.Tensor, 
     Returns:
         float: Perplexity computed by taking the exponent of the loss.
     """
-    return torch.exp(loss) if isinstance(loss, torch.Tensor) else math.exp(loss)
+    return torch.exp(loss).item() if isinstance(loss, torch.Tensor) else math.exp(loss)

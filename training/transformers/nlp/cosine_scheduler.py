@@ -13,10 +13,10 @@ def cosine_with_warmup_scheduler(
     """Custom cosine decay learning rate scheduler with linear warmup.
 
     Args:
-        optimizer (Optimizer): PyTorch optimizer to udpate weights.
+        optimizer (Optimizer): PyTorch optimizer to update weights.
         num_warmup_steps (int): Number of warmup steps.
         num_training_steps (int): Total number of training steps.
-        num_cycles (int): Number of cosine waves are completed.
+        num_cycles (int): Number of cosine waves to be completed.
         last_epoch (int): Parameter for custom LambdaLR.
 
     Returns:
@@ -27,7 +27,11 @@ def cosine_with_warmup_scheduler(
         if current_step < num_warmup_steps:
             return float(current_step) / float(num_warmup_steps)
         # Cosine decay
-        progress = float(current_step - num_warmup_steps) / float(num_training_steps - num_warmup_steps)
+        progress = float(
+            current_step - num_warmup_steps
+        ) / float(
+            num_training_steps - num_warmup_steps
+        )
         return 0.5 * (1.0 + math.cos(math.pi * 2.0 * num_cycles * progress))
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)
