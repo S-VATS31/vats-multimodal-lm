@@ -7,12 +7,12 @@ from configs.transformers.nlp.model_args.post_init import PostInitMixin
 @dataclass
 class ModelArgs(PostInitMixin):
     """Small configuration of model arguments."""
-    d_model: int = 1024
+    d_model: int = 768
     num_heads: int = 32
     query_groups: int = 8
     softmax_scale: Optional[float] = None
-    d_ffn: int = 1024*4
-    num_layers: int = 12
+    d_ffn: int = 768*4
+    num_layers: int = 10
     dropout: float = 0.1
     rope_base: float = 10000.0
     rms_norm_eps: float = 1e-7
