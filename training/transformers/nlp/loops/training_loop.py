@@ -88,8 +88,7 @@ def train(
     generation_args: GenerationArgs,
     scaler: Optional[GradScaler] = None,
 ) -> Tuple[float, float, float, float, int, bool]:
-    """
-    Train for set amount of tokens.
+    """Train for set amount of tokens.
 
     Args:
         model (AutoregressiveTextTransformer): Transformer.

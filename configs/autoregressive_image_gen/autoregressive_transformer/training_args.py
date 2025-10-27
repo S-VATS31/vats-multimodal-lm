@@ -21,4 +21,5 @@ class TrainingArgs:
     persistent_workers: bool = True
     drop_last: bool = True
     grad_accum_steps: int = 4
+    max_skipped_steps: int = 100
     
